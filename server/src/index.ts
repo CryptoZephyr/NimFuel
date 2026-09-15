@@ -2,7 +2,7 @@ import { createPublicClient, createWalletClient, formatUnits, http, parseEventLo
 import { privateKeyToAccount } from 'viem/accounts'
 import { timingSafeEqual } from 'node:crypto'
 import { databaseHealth, initializeDatabase, closeDatabase } from './db.js'
-import { armLiveBroadcastWindow, config, isLiveBroadcastEnabled, polygon, POLYGON_CHAIN_ID, POLYGON_USDT_ADDRESS, requireAddress, requireRawAmount, requireUnsignedInteger } from './config.js'
+import { armLiveBroadcastWindow, config, formatUsdtAmount, isLiveBroadcastEnabled, polygon, POLYGON_CHAIN_ID, POLYGON_USDT_ADDRESS, requireAddress, requireRawAmount, requireUnsignedInteger, USDT_DECIMALS, usdtAmountPolicy, validateUsdtAmount } from './config.js'
 import {
   confirmRefund,
   confirmNimPayment,
@@ -39,7 +39,6 @@ const walletClient = relayerAccount
   : null
 
 const allowedOrigin = '*'
-const LIVE_RELAY_MAX_AMOUNT_RAW = 100_000n
 const inFlightRelays = new Map<string, Promise<unknown>>()
 const recoveryInFlight = new Set<string>()
 
@@ -116,7 +115,8 @@ async function readCapability() {
     relayerConfigured: Boolean(relayerAccount),
     relayerAddress: relayerAccount?.address ?? null,
     liveBroadcastEnabled: isLiveBroadcastEnabled(),
-    liveRelayMaxAttempts: config.liveRelayMaxAttempts,
+    relayMaxAttempts: config.relayMaxAttempts,
+    amountPolicy: usdtAmountPolicy(),
     orderStorage: 'postgres',
   }
 }
@@ -131,10 +131,17 @@ type RelayPreparationInput = {
   signature: unknown
 }
 
+function enforceLiveProofAmount(amountRaw: bigint) {
+  if (config.liveProofAmountRaw !== null && amountRaw !== config.liveProofAmountRaw) {
+    throw new Error(`The controlled live proof accepts exactly ${formatUsdtAmount(config.liveProofAmountRaw)} USDT.`)
+  }
+}
+
 async function prepareRelayAuthorization(input: RelayPreparationInput) {
   const userAddress = requireAddress(input.userAddress, 'userAddress')
   const recipient = requireAddress(input.recipient, 'recipient')
   const amountRaw = typeof input.amountRaw === 'bigint' ? input.amountRaw : requireRawAmount(input.amountRaw)
+  validateUsdtAmount(amountRaw)
   const nonce = typeof input.nonce === 'bigint' ? input.nonce : requireUnsignedInteger(input.nonce, 'nonce')
   const deadline = typeof input.deadline === 'bigint' ? input.deadline : requireUnsignedInteger(input.deadline, 'deadline')
   const functionSignature = input.functionSignature
@@ -172,6 +179,9 @@ async function prepareRelayAuthorization(input: RelayPreparationInput) {
 
   if (currentNonce !== nonce) {
     throw new Error(`Authorization nonce is stale. Expected ${currentNonce.toString()}.`)
+  }
+  if (Number(decimals) !== USDT_DECIMALS) {
+    throw new Error(`The configured USDT token returned ${String(decimals)} decimals, expected ${USDT_DECIMALS}.`)
   }
   if (amountRaw > userBalance) throw new Error('User USDT balance is too low for this transfer.')
 
@@ -272,9 +282,7 @@ async function validateRelay(body: Record<string, unknown>) {
 
 async function createPreflight(body: Record<string, unknown>) {
   const prepared = await prepareRelay(body)
-  if (prepared.amountRaw !== LIVE_RELAY_MAX_AMOUNT_RAW) {
-    throw new Error('The current live proof supports exactly 0.1 USDT.')
-  }
+  enforceLiveProofAmount(prepared.amountRaw)
   const prices = await readMarketPrices()
   const calculation = calculateNimQuote({
     estimatedFeeRaw: prepared.estimatedFeeRaw,
@@ -314,6 +322,7 @@ async function createPreflight(body: Record<string, unknown>) {
 
   return {
     ...relayResponse(prepared),
+    amountPolicy: usdtAmountPolicy(),
     preflight: {
       userUsdtBalance: formatUnits(prepared.userUsdtBalanceRaw, prepared.decimals),
       userPolBalance: formatUnits(prepared.userPolBalanceRaw, 18),
@@ -504,7 +513,7 @@ async function adminOrderSnapshot(order: NimfuelOrder) {
     order: publicOrder(order),
     relayAttempts: attempts.map(relayResponseFromAttempt),
     relayAttemptsUsed: attempts.length,
-    relayAttemptsRemaining: Math.max(0, config.liveRelayMaxAttempts - attempts.length),
+    relayAttemptsRemaining: Math.max(0, config.relayMaxAttempts - attempts.length),
     refundInstruction: refundInstruction(order),
   }
 }
@@ -699,9 +708,7 @@ async function markRelayRecovery(orderId: string, authorizationDigest: string, m
 async function executeNewRelay(orderId: string, prepared: Awaited<ReturnType<typeof prepareRelay>>) {
   if (!isLiveBroadcastEnabled()) throw new Error('Live broadcast is disabled.')
   if (!relayerAccount || !walletClient) throw new Error('Relayer private key is not configured with a valid format.')
-  if (prepared.amountRaw !== LIVE_RELAY_MAX_AMOUNT_RAW) {
-    throw new Error('The first live relay is limited to exactly 0.1 USDT.')
-  }
+  enforceLiveProofAmount(prepared.amountRaw)
 
   const reservation = await reserveRelayAttempt(orderId, authorizationRecord(orderId, prepared))
   if (!reservation.created) return await reconcileRelayAttempt(orderId, reservation.attempt)
@@ -880,6 +887,8 @@ const server = (await import('node:http')).createServer(async (request, response
         refundVerificationConfigured: Boolean(config.nimVerificationEndpoint),
         databaseConfigured: config.databaseConfigured,
         liveBroadcastEnabled: isLiveBroadcastEnabled(),
+        relayMaxAttempts: config.relayMaxAttempts,
+        amountPolicy: usdtAmountPolicy(),
       })
       return
     }

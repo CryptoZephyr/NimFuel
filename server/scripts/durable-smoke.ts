@@ -1,4 +1,4 @@
-import { config } from '../src/config.js'
+import { config, validateUsdtAmount } from '../src/config.js'
 import { initializeDatabase, pool } from '../src/db.js'
 import {
   confirmNimPayment,
@@ -10,6 +10,7 @@ import {
   getRelayAttemptByDigest,
   getRelayAttemptCount,
   getOrder,
+  markPaymentMismatch,
   recordRefundFailure,
   recordRelayOutcome,
   recordRelaySubmission,
@@ -35,14 +36,18 @@ async function request(path: string, init?: RequestInit) {
   return { status: response.status, body }
 }
 
-function authorizationRecord(digestByte: string) {
+function testUserAddress(seed: string) {
+  return `0x${seed.repeat(40).slice(0, 40)}`
+}
+
+function authorizationRecord(digestByte: string, userAddress = evmAddress, requestedAmountRaw = amountRaw) {
   return {
     authorizationDigest: `0x${digestByte.repeat(32)}`,
     nonce: 0n,
     deadline: BigInt(Math.floor(Date.now() / 1000) + 900),
-    userAddress: evmAddress,
-    recipient: evmAddress,
-    amountRaw,
+    userAddress,
+    recipient: userAddress,
+    amountRaw: requestedAmountRaw,
     decimals: 6,
     functionSignature: '0x1234',
     signature: `0x${'22'.repeat(65)}`,
@@ -54,9 +59,9 @@ function authorizationRecord(digestByte: string) {
   }
 }
 
-async function createTestQuote(digestByte: string, ttlSeconds = 900) {
+async function createTestQuote(digestByte: string, ttlSeconds = 900, requestedAmountRaw = amountRaw, userAddress = testUserAddress(digestByte)) {
   const quote = await createQuote({
-    authorization: authorizationRecord(digestByte),
+    authorization: authorizationRecord(digestByte, userAddress, requestedAmountRaw),
     polPriceUsdNanos: 100_000_000n,
     nimPriceUsdNanos: 1_000_000n,
     serviceFeeBps: 500,
@@ -114,6 +119,52 @@ async function main() {
   })
   assert(invalidAmount.status === 400, 'An invalid zero amount was accepted.')
   console.log('invalid amounts: pass')
+
+  const flexibleAmountRaw = 1_250_000n
+  assert(validateUsdtAmount(flexibleAmountRaw) === flexibleAmountRaw, 'A valid non-proof USDT amount was rejected.')
+  const flexibleQuote = await createTestQuote('f1', 900, flexibleAmountRaw)
+  const flexibleOrder = await createOrderFromQuote({
+    nimAddress,
+    paymentRecipient: config.nimRecipient!,
+    quoteId: flexibleQuote.id,
+  })
+  createdOrderIds.push(flexibleOrder.id)
+  assert(flexibleOrder.amountRaw === flexibleAmountRaw, 'A flexible USDT amount was not retained in the order.')
+  console.log('flexible amount policy and order: pass')
+
+  const nonceUser = testUserAddress('ab')
+  const nonceQuote = await createTestQuote('f2', 900, amountRaw, nonceUser)
+  const conflictingNonceQuote = await createTestQuote('f3', 900, flexibleAmountRaw, nonceUser)
+  const nonceOrder = await createOrderFromQuote({
+    nimAddress,
+    paymentRecipient: config.nimRecipient!,
+    quoteId: nonceQuote.id,
+  })
+  createdOrderIds.push(nonceOrder.id)
+  let nonceConflictRejected = false
+  try {
+    await createOrderFromQuote({
+      nimAddress,
+      paymentRecipient: config.nimRecipient!,
+      quoteId: conflictingNonceQuote.id,
+    })
+  } catch (error) {
+    nonceConflictRejected = error instanceof Error && error.message.includes('active order for authorization nonce')
+  }
+  assert(nonceConflictRejected, 'Two active orders were allowed to compete for one wallet nonce.')
+  await markPaymentMismatch(nonceOrder.id, 'Smoke-test mismatched payment.')
+  let mismatchConflictRejected = false
+  try {
+    await createOrderFromQuote({
+      nimAddress,
+      paymentRecipient: config.nimRecipient!,
+      quoteId: conflictingNonceQuote.id,
+    })
+  } catch (error) {
+    mismatchConflictRejected = error instanceof Error && error.message.includes('active order for authorization nonce')
+  }
+  assert(mismatchConflictRejected, 'A mismatched payment order was allowed to release its wallet nonce.')
+  console.log('nonce conflict guard: pass')
 
   const quoteOrder = await createTestQuote('e1')
   const quoteCreated = await createOrderFromQuote({
@@ -270,7 +321,7 @@ async function main() {
 
   const capped = await directOrder()
   await confirmNimPayment({ orderId: capped.id, txHash: 'ff'.repeat(32), blockNumber: 6, confirmations: 1 })
-  for (let index = 0; index < config.liveRelayMaxAttempts; index += 1) {
+  for (let index = 0; index < config.relayMaxAttempts; index += 1) {
     const byte = (0x30 + index).toString(16).padStart(2, '0')
     const attemptAuthorization = authorization(capped.id, byte)
     await reserveRelayAttempt(capped.id, attemptAuthorization)

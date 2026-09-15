@@ -275,6 +275,22 @@ h2 {
   transform: translateY(1px);
 }
 
+.secondary-button {
+  width: 100%;
+  min-height: 43px;
+  margin-top: 12px;
+  padding: 0 16px;
+  border: 1px solid #b9cbbd;
+  border-radius: 10px;
+  color: var(--green-dark);
+  background: #fff;
+  font-weight: 750;
+}
+
+.secondary-button:hover:not(:disabled) {
+  background: var(--green-soft);
+}
+
 .primary-button:focus-visible,
 input:focus-visible,
 a:focus-visible {

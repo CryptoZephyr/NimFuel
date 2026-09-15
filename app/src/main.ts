@@ -67,6 +67,12 @@ type NimQuote = {
   priceRetrievedAt: { nim: string; pol: string }
 }
 
+type AmountPolicy = {
+  minUsdtAmount: string
+  maxUsdtAmount: string | null
+  liveProofAmountUsdt: string | null
+}
+
 type NimOrder = {
   orderId: string
   reference: string
@@ -105,6 +111,7 @@ type NimOrder = {
 }
 
 type PreflightResponse = {
+  amountPolicy: AmountPolicy
   preflight: {
     userUsdtBalance: string
     userPolBalance: string
@@ -114,6 +121,12 @@ type PreflightResponse = {
     relayerCanPayGas: boolean
   }
   quote: NimQuote
+}
+
+type CapabilityResponse = {
+  amountPolicy: AmountPolicy
+  relayMaxAttempts: number
+  liveBroadcastEnabled: boolean
 }
 
 type RelayPayload = {
@@ -143,6 +156,8 @@ const config = {
   usdtAddress: import.meta.env.PUBLIC_USDT_ADDRESS,
   nimRecipient: import.meta.env.PUBLIC_NIMFUEL_NIM_RECIPIENT,
 }
+const USDT_DECIMALS = 6
+const ORDER_STORAGE_KEY = 'nimfuel:current-order-id'
 
 let nimiqPromise: ReturnType<typeof init> | null = null
 let nimAddress: string | null = null
@@ -151,7 +166,8 @@ let nimQuote: NimQuote | null = null
 let preflightInfo: PreflightResponse['preflight'] | null = null
 let nimOrder: NimOrder | null = null
 let relayRecipientDraft = ''
-let relayAmountDraft = '0.1'
+let relayAmountDraft = (import.meta.env.PUBLIC_DEFAULT_USDT_AMOUNT || '').trim()
+let amountPolicy: AmountPolicy | null = null
 let walletSnapshot = { pol: '', usdt: '' }
 let results: Result[] = initialResults()
 let flowState: FlowState = 'idle'
@@ -241,6 +257,38 @@ function parseTokenAmount(value: string, decimals: number) {
   return amount
 }
 
+function amountPolicyHint() {
+  if (!amountPolicy) return 'Enter the USDT amount you want to send. NimFuel checks the configured range before asking for authorization and calculates the NIM quote from live Polygon gas.'
+  if (amountPolicy.liveProofAmountUsdt) {
+    return `The current controlled proof accepts exactly ${amountPolicy.liveProofAmountUsdt} USDT. Other amounts become available when proof mode is closed.`
+  }
+  if (amountPolicy.maxUsdtAmount) {
+    return `Enter between ${amountPolicy.minUsdtAmount} and ${amountPolicy.maxUsdtAmount} USDT. The final NIM quote is calculated from live Polygon gas and prices.`
+  }
+  return `Enter at least ${amountPolicy.minUsdtAmount} USDT. Your wallet balance is the effective upper limit, and the final NIM quote is calculated from live Polygon gas and prices.`
+}
+
+function validateClientAmountPolicy(amountRaw: bigint) {
+  if (!amountPolicy) throw new Error('The USDT amount policy could not be loaded.')
+  if (amountPolicy.liveProofAmountUsdt !== null) {
+    const proofAmountRaw = parseTokenAmount(amountPolicy.liveProofAmountUsdt, USDT_DECIMALS)
+    if (amountRaw !== proofAmountRaw) throw new Error(`The controlled live proof accepts exactly ${amountPolicy.liveProofAmountUsdt} USDT.`)
+  }
+  const minAmountRaw = parseTokenAmount(amountPolicy.minUsdtAmount, USDT_DECIMALS)
+  if (amountRaw < minAmountRaw) throw new Error(`USDT amount must be at least ${amountPolicy.minUsdtAmount}.`)
+  if (amountPolicy.maxUsdtAmount !== null) {
+    const maxAmountRaw = parseTokenAmount(amountPolicy.maxUsdtAmount, USDT_DECIMALS)
+    if (amountRaw > maxAmountRaw) throw new Error(`USDT amount must be at most ${amountPolicy.maxUsdtAmount}.`)
+  }
+}
+
+async function loadAmountPolicy() {
+  const response = await apiRequest<CapabilityResponse>('/v1/relay/capability')
+  if (!response.amountPolicy) throw new Error('The server did not return a USDT amount policy.')
+  amountPolicy = response.amountPolicy
+  return amountPolicy
+}
+
 function encodeAddressArgument(address: string) {
   if (!/^0x[0-9a-f]{40}$/i.test(address)) throw new Error('Enter a valid Polygon address.')
   return address.slice(2).toLowerCase().padStart(64, '0')
@@ -285,6 +333,8 @@ function friendlyError(error: unknown, fallback: string) {
   if (message === 'Failed to fetch' || message.toLowerCase().includes('could not be reached')) return 'NimFuel could not be reached. Check that the server is running and try again.'
   if (message.includes('Live broadcast is disabled')) return 'The Polygon relay window is closed. Nothing was broadcast.'
   if (message.includes('NIM payment did not match')) return 'The NIM transaction did not match this order. Check the amount and reference, then verify again.'
+  if (message.includes('already created an order')) return 'This authorization already belongs to an order. Continue that order instead of paying again.'
+  if (message.includes('active order for authorization nonce')) return 'This wallet already has an active order. Finish or recover it before starting another action.'
   return message
 }
 
@@ -325,6 +375,70 @@ function stateLabel(state: string) {
 
 function quoteExpired(quote: NimQuote) {
   return Date.now() >= Date.parse(quote.expiresAt)
+}
+
+function isTerminalOrderState(state: string) {
+  return ['PAYMENT_EXPIRED', 'FULFILLED', 'REFUNDED'].includes(state)
+}
+
+function rememberOrder(order: NimOrder | null) {
+  try {
+    if (order) localStorage.setItem(ORDER_STORAGE_KEY, order.orderId)
+    else localStorage.removeItem(ORDER_STORAGE_KEY)
+  } catch {
+    // Some embedded wallet browsers disable local storage. The in-memory flow still works.
+  }
+}
+
+function savedOrderId() {
+  try {
+    const queryOrderId = new URLSearchParams(window.location.search).get('orderId')?.trim()
+    const storedOrderId = localStorage.getItem(ORDER_STORAGE_KEY)?.trim()
+    const candidate = queryOrderId || storedOrderId
+    return candidate && /^nf_[a-f0-9]+$/i.test(candidate) ? candidate : null
+  } catch {
+    return null
+  }
+}
+
+async function restoreSavedOrder() {
+  const orderId = savedOrderId()
+  if (!orderId) return
+  try {
+    const order = await apiRequest<NimOrder>(`/v1/orders/${encodeURIComponent(orderId)}`)
+    nimOrder = order
+    nimAddress = order.nimAddress
+    evmAddress = order.evmAddress
+    relayRecipientDraft = order.recipient
+    relayAmountDraft = formatUnits(BigInt(order.amountRaw), USDT_DECIMALS)
+    flowState = flowStateForOrder(order)
+    setNotice('Your previous order was restored. Continue it here.', isTerminalOrderState(order.state) ? 'success' : 'neutral')
+    render()
+  } catch {
+    rememberOrder(null)
+  }
+}
+
+function clearCurrentOrder() {
+  if (!nimOrder || !isTerminalOrderState(nimOrder.state)) return
+  rememberOrder(null)
+  nimOrder = null
+  nimQuote = null
+  preflightInfo = null
+  amountPolicy = null
+  relayRecipientDraft = evmAddress || ''
+  relayAmountDraft = (import.meta.env.PUBLIC_DEFAULT_USDT_AMOUNT || '').trim()
+  targetFeedback = ''
+  paymentFeedback = ''
+  relayFeedback = ''
+  flowState = evmAddress && nimAddress ? 'ready' : 'idle'
+  setNotice('The previous order is closed. Prepare another USDT action.', 'success')
+  render()
+}
+
+function renderNewActionButton() {
+  if (!nimOrder || !isTerminalOrderState(nimOrder.state)) return ''
+  return '<button id="start-new-action" class="secondary-button" type="button">Start another USDT action</button>'
 }
 
 function setNotice(message: string, tone: NoticeTone = 'neutral') {
@@ -382,7 +496,7 @@ function renderActionPanel() {
   return `
     <section class="panel action-panel">
       <div class="section-heading"><div><p class="eyebrow">USDT ACTION</p><h2>Prepare the action you need</h2></div><span class="badge">Polygon</span></div>
-      <p class="form-help">${escapeHtml(gasNote)} The current live proof supports exactly 0.1 USDT.</p>
+      <p class="form-help">${escapeHtml(gasNote)} ${escapeHtml(amountPolicyHint())}</p>
       <div class="form-grid">
         <label><span>Send USDT to</span><input id="relay-recipient" type="text" inputmode="text" autocomplete="off" placeholder="0x..." value="${escapeHtml(defaultRecipient)}" ${locked ? 'disabled' : ''} /></label>
         <label><span>Amount in USDT</span><input id="relay-amount" type="text" inputmode="decimal" value="${escapeHtml(relayAmountDraft)}" ${locked ? 'disabled' : ''} /></label>
@@ -401,7 +515,7 @@ function renderQuotePanel() {
     <section class="panel quote-panel">
       <div class="section-heading"><div><p class="eyebrow">QUOTE READY</p><h2>Review the NIM cost</h2></div><span class="badge ${expired ? 'badge-warn' : 'badge-good'}">${expired ? 'Expired' : 'Live quote'}</span></div>
       <div class="quote-hero"><span>You pay</span><strong>${escapeHtml(nimQuote.paymentAmountNim)} NIM</strong><small>Quote expires ${escapeHtml(new Date(nimQuote.expiresAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }))}</small></div>
-      <div class="summary-list"><div><span>USDT action</span><strong>${escapeHtml(formatUnits(BigInt(nimQuote.amountRaw), 6))} USDT</strong></div><div><span>Estimated Polygon gas</span><strong>${escapeHtml(nimQuote.estimatedFeePol)} POL</strong></div><div><span>Gas and service value</span><strong>$${escapeHtml(nimQuote.serviceCostUsd)} USD</strong></div><div><span>Payment reference</span><strong>Created after you continue</strong></div></div>
+      <div class="summary-list"><div><span>USDT action</span><strong>${escapeHtml(formatUnits(BigInt(nimQuote.amountRaw), USDT_DECIMALS))} USDT</strong></div><div><span>Estimated Polygon gas</span><strong>${escapeHtml(nimQuote.estimatedFeePol)} POL</strong></div><div><span>Gas and service value</span><strong>$${escapeHtml(nimQuote.serviceCostUsd)} USD</strong></div><div><span>Payment reference</span><strong>Created after you continue</strong></div></div>
       <button id="create-nim-order" class="primary-button" type="button" ${expired ? 'disabled' : ''}>Continue with NIM</button>
       <p class="status-line">The quote is bound to the authorization you just approved. No Polygon transaction has been sent.</p>
     </section>
@@ -409,7 +523,7 @@ function renderQuotePanel() {
 }
 
 function renderPaymentPanel() {
-  if (!nimOrder) return ''
+  if (!nimOrder || nimOrder.state === 'FULFILLED') return ''
   const paymentNim = String(nimOrder.paymentAmountNim)
   let action = ''
   if (nimOrder.state === 'AWAITING_NIM_PAYMENT' && nimOrder.paymentTxHash) action = '<button id="verify-nim-payment" class="primary-button" type="button">Verify NIM payment</button>'
@@ -424,6 +538,7 @@ function renderPaymentPanel() {
       <div class="summary-list"><div><span>Amount</span><strong>${escapeHtml(paymentNim)} NIM</strong></div><div><span>Pay to</span><strong>${escapeHtml(shorten(nimOrder.paymentRecipient, 10, 8))}</strong></div><div><span>Reference</span><strong>${escapeHtml(nimOrder.reference)}</strong></div>${nimOrder.paymentBlockNumber ? `<div><span>Included in block</span><strong>${escapeHtml(String(nimOrder.paymentBlockNumber))}</strong></div>` : ''}</div>
       ${action}
       <p id="payment-status" class="status-line" aria-live="polite">${escapeHtml(paymentFeedback || (nimOrder.paymentTxHash ? 'Payment submitted. Verify it after inclusion.' : 'No payment has been requested yet.'))}</p>
+      ${renderNewActionButton()}
     </section>
   `
 }
@@ -453,7 +568,7 @@ function renderSuccessPanel() {
   if (!nimOrder || nimOrder.state !== 'FULFILLED') return ''
   const polygonLink = nimOrder.relayTxHash ? `<a href="https://polygonscan.com/tx/${encodeURIComponent(nimOrder.relayTxHash)}" target="_blank" rel="noreferrer">View Polygon receipt</a>` : ''
   return `
-    <section class="panel success-panel"><span class="success-mark">✓</span><p class="eyebrow">FULFILLED</p><h2>Done. Your USDT action succeeded.</h2><p class="lede">The Polygon receipt and intended USDT state change were verified before this result appeared.</p><div class="summary-list"><div><span>NIM payment</span><strong>${escapeHtml(nimOrder.paymentTxHash ? shorten(nimOrder.paymentTxHash, 12, 10) : 'verified')}</strong></div><div><span>Polygon transaction</span><strong>${escapeHtml(nimOrder.relayTxHash ? shorten(nimOrder.relayTxHash, 12, 10) : 'verified')}</strong></div></div>${polygonLink ? `<div class="link-row">${polygonLink}</div>` : ''}</section>
+    <section class="panel success-panel"><span class="success-mark">✓</span><p class="eyebrow">FULFILLED</p><h2>Done. Your USDT action succeeded.</h2><p class="lede">The Polygon receipt and intended USDT state change were verified before this result appeared.</p><div class="summary-list"><div><span>NIM payment</span><strong>${escapeHtml(nimOrder.paymentTxHash ? shorten(nimOrder.paymentTxHash, 12, 10) : 'verified')}</strong></div><div><span>Polygon transaction</span><strong>${escapeHtml(nimOrder.relayTxHash ? shorten(nimOrder.relayTxHash, 12, 10) : 'verified')}</strong></div></div>${polygonLink ? `<div class="link-row">${polygonLink}</div>` : ''}${renderNewActionButton()}</section>
   `
 }
 
@@ -462,11 +577,12 @@ function renderRecoveryPanel() {
   const refunded = nimOrder.state === 'REFUNDED'
   const pending = nimOrder.state === 'REFUND_PENDING'
   return `
-    <section class="panel recovery-panel"><div class="section-heading"><div><p class="eyebrow">${refunded ? 'REFUND VERIFIED' : pending ? 'REFUND IN PROGRESS' : 'RECOVERY REQUIRED'}</p><h2>${refunded ? 'Your NIM refund was verified.' : 'Your NIM payment is safe in this order.'}</h2></div><span class="badge ${refunded ? 'badge-good' : 'badge-warn'}">${escapeHtml(stateLabel(nimOrder.state))}</span></div><p class="form-help">${refunded ? 'The refund transaction matched the order recipient, amount, reference, and confirmation state.' : 'The Polygon action has not completed. The order reference below lets support retry safely or issue and verify a refund without charging you again.'}</p><div class="summary-list"><div><span>Order reference</span><strong>${escapeHtml(nimOrder.reference)}</strong></div><div><span>Refund amount</span><strong>${escapeHtml(nimOrder.refundAmountNim || formatLuna(nimOrder.paymentAmountLuna))} NIM</strong></div>${nimOrder.refundTxHash ? `<div><span>Refund transaction</span><strong>${escapeHtml(shorten(nimOrder.refundTxHash, 12, 10))}</strong></div>` : ''}</div>${pending ? '<p class="status-line">Refund verification is pending. Keep this order reference for support.</p>' : ''}</section>
+    <section class="panel recovery-panel"><div class="section-heading"><div><p class="eyebrow">${refunded ? 'REFUND VERIFIED' : pending ? 'REFUND IN PROGRESS' : 'RECOVERY REQUIRED'}</p><h2>${refunded ? 'Your NIM refund was verified.' : 'Your NIM payment is safe in this order.'}</h2></div><span class="badge ${refunded ? 'badge-good' : 'badge-warn'}">${escapeHtml(stateLabel(nimOrder.state))}</span></div><p class="form-help">${refunded ? 'The refund transaction matched the order recipient, amount, reference, and confirmation state.' : 'The Polygon action has not completed. The order reference below lets support retry safely or issue and verify a refund without charging you again.'}</p><div class="summary-list"><div><span>Order reference</span><strong>${escapeHtml(nimOrder.reference)}</strong></div><div><span>Refund amount</span><strong>${escapeHtml(nimOrder.refundAmountNim || formatLuna(nimOrder.paymentAmountLuna))} NIM</strong></div>${nimOrder.refundTxHash ? `<div><span>Refund transaction</span><strong>${escapeHtml(shorten(nimOrder.refundTxHash, 12, 10))}</strong></div>` : ''}</div>${pending ? '<p class="status-line">Refund verification is pending. Keep this order reference for support.</p>' : ''}${renderNewActionButton()}</section>
   `
 }
 
 function render() {
+  if (nimOrder) rememberOrder(nimOrder)
   root.innerHTML = `
     <div class="shell">
       <header class="masthead"><div class="brand-lockup"><span class="brand-mark">N</span><span>NimFuel</span></div><span class="network-label">Polygon / NIM</span></header>
@@ -488,6 +604,7 @@ function render() {
   document.querySelector<HTMLButtonElement>('#pay-nim-order')?.addEventListener('click', sendNimPayment)
   document.querySelector<HTMLButtonElement>('#verify-nim-payment')?.addEventListener('click', verifyNimPayment)
   document.querySelector<HTMLButtonElement>('#relay-paid-order')?.addEventListener('click', relayPaidOrder)
+  document.querySelector<HTMLButtonElement>('#start-new-action')?.addEventListener('click', clearCurrentOrder)
 }
 
 render()
@@ -502,13 +619,21 @@ function startNimiqInit() {
 }
 
 startNimiqInit()
+void restoreSavedOrder()
 
 async function runChecks() {
+  if (nimOrder && !isTerminalOrderState(nimOrder.state)) {
+    setNotice('Finish or recover the current order before starting another action.', 'error')
+    render()
+    return
+  }
+  if (nimOrder) clearCurrentOrder()
   nimAddress = null
   evmAddress = null
   nimQuote = null
   preflightInfo = null
   nimOrder = null
+  amountPolicy = null
   relayRecipientDraft = ''
   walletSnapshot = { pol: '', usdt: '' }
   targetFeedback = ''
@@ -603,7 +728,7 @@ async function collectRelayPayload(): Promise<RelayPayload> {
   if (!provider || !evmAddress) throw new Error('Run the wallet check first.')
   readRelayDraft()
   const recipient = relayRecipientDraft || evmAddress
-  const amountRaw = parseTokenAmount(relayAmountDraft, 6)
+  const amountRaw = parseTokenAmount(relayAmountDraft, USDT_DECIMALS)
   encodeAddressArgument(recipient)
   if (!config.apiBaseUrl) throw new Error('The NimFuel API is not configured for this build.')
   setTargetStatus('Reading the current USDT authorization nonce.')
@@ -630,7 +755,14 @@ async function prepareQuote() {
   try {
     if (!nimAddress || !evmAddress) throw new Error('Run the wallet check first.')
     readRelayDraft()
-    if (parseTokenAmount(relayAmountDraft, 6) !== 100_000n) throw new Error('The current live proof supports exactly 0.1 USDT.')
+    const requestedAmountRaw = parseTokenAmount(relayAmountDraft, USDT_DECIMALS)
+    if (!amountPolicy) {
+      setNotice('Checking the accepted USDT amount range.')
+      setTargetStatus('Checking the accepted USDT amount range before asking for authorization.')
+      render()
+      await loadAmountPolicy()
+    }
+    validateClientAmountPolicy(requestedAmountRaw)
     nimQuote = null
     preflightInfo = null
     nimOrder = null
@@ -750,7 +882,7 @@ async function relayPaidOrder() {
     let requestBody: Record<string, unknown> = { orderId: nimOrder.orderId }
     if (nimOrder.state === 'RELAY_FAILED') {
       readRelayDraft()
-      const amountRaw = parseTokenAmount(relayAmountDraft, 6).toString()
+      const amountRaw = parseTokenAmount(relayAmountDraft, USDT_DECIMALS).toString()
       if (amountRaw !== nimOrder.amountRaw || relayRecipientDraft.toLowerCase() !== nimOrder.recipient.toLowerCase()) throw new Error('Keep the original recipient and amount when retrying this paid order.')
       flowState = 'authorizing'
       setNotice('A retry needs a fresh USDT authorization.')

@@ -516,7 +516,9 @@ export async function createQuote(input: {
     'SELECT consumed_order_id FROM quotes WHERE authorization_digest = $1',
     [input.authorization.authorizationDigest],
   )
-  if (existing.rows[0]?.consumed_order_id) throw new Error('This authorization has already created an order.')
+  if (existing.rows[0]?.consumed_order_id) {
+    throw new Error('This authorization has already created an order. Continue that order instead of creating another.')
+  }
   throw new Error('The authorization quote could not be persisted.')
 }
 
@@ -606,6 +608,22 @@ export async function createOrderFromQuote(input: {
     const quote = mapQuote(quoteRow)
     if (quote.consumedOrderId) throw new Error('This quote has already been used.')
     if (Date.now() >= quote.expiresAt) throw new Error('This quote has expired. Prepare a new quote.')
+
+    const activeNonceResult = await client.query<{ id: string; state: OrderState }>(
+      `SELECT o.id, o.state
+       FROM orders o
+       JOIN quotes consumed_quote ON consumed_quote.consumed_order_id = o.id
+       WHERE LOWER(consumed_quote.user_address) = LOWER($1)
+         AND consumed_quote.nonce = $2
+         AND o.state NOT IN ('PAYMENT_EXPIRED', 'FULFILLED', 'REFUNDED')
+       ORDER BY o.created_at DESC
+       LIMIT 1
+       FOR UPDATE OF o`,
+      [quote.userAddress, quote.nonce.toString()],
+    )
+    if (activeNonceResult.rows[0]) {
+      throw new Error(`This wallet already has an active order for authorization nonce ${quote.nonce.toString()}. Finish or recover that order before creating another.`)
+    }
 
     const id = `nf_${randomUUID().replaceAll('-', '')}`
     const reference = `NIMFUEL:${id}`
@@ -826,7 +844,7 @@ export async function reserveRelayAttempt(orderId: string, input: RelayAuthoriza
         'SELECT COUNT(*)::text AS count FROM relay_attempts WHERE order_id = $1',
         [orderId],
       )
-      if (Number(countResult.rows[0]?.count || '0') >= config.liveRelayMaxAttempts) {
+      if (Number(countResult.rows[0]?.count || '0') >= config.relayMaxAttempts) {
         await client.query(
           `UPDATE orders
            SET state = 'RECOVERY_REQUIRED',
