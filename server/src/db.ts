@@ -1,7 +1,8 @@
 import { Pool, type PoolClient } from 'pg'
 import { config } from './config.js'
 
-const databaseUrl = new URL(config.databaseUrl)
+const databaseUrlValue = config.databaseUrl.trim().replace(/^(['"])(.*)\1$/, '$2')
+const databaseUrl = new URL(databaseUrlValue)
 const databaseName = decodeURIComponent(databaseUrl.pathname.replace(/^\/+/, ''))
 
 if (!databaseName) {
