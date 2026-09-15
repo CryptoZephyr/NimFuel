@@ -8,6 +8,7 @@
     "build": "tsc -p tsconfig.json",
     "start": "node --env-file=.env dist/index.js",
     "test:durable": "tsx --env-file=.env scripts/durable-smoke.ts",
+    "test:quote": "tsx --env-file=.env scripts/quote-smoke.ts",
     "verify:relay": "tsx --env-file=.env scripts/verify-relay.ts"
   },
   "dependencies": {

@@ -9,9 +9,26 @@ const nimRecipient = process.env.NIMFUEL_NIM_RECIPIENT?.trim() || null
 const nimPaymentAmountLunaRaw = process.env.NIMFUEL_TEST_PAYMENT_LUNA?.trim() || null
 const databaseUrl = process.env.DATABASE_URL?.trim()
 const liveRelayMaxAttemptsRaw = process.env.NIMFUEL_LIVE_RELAY_MAX_ATTEMPTS?.trim() || '1'
+const relayReservationGraceRaw = process.env.NIMFUEL_RELAY_RESERVATION_GRACE_SECONDS?.trim() || '60'
 const liveBroadcastTtlRaw = process.env.NIMFUEL_LIVE_BROADCAST_TTL_SECONDS?.trim() || null
+const quoteTtlRaw = process.env.NIMFUEL_QUOTE_TTL_SECONDS?.trim() || '300'
+const serviceFeeBpsRaw = process.env.NIMFUEL_SERVICE_FEE_BPS?.trim() || '0'
+const minPaymentLunaRaw = process.env.NIMFUEL_MIN_PAYMENT_LUNA?.trim() || '1000'
+const fixedServiceFeeLunaRaw = process.env.NIMFUEL_FIXED_SERVICE_FEE_LUNA?.trim() || '0'
+const adminApiToken = process.env.ADMIN_API_TOKEN?.trim() || null
 const nimPaymentAmountLuna = nimPaymentAmountLunaRaw && /^\d+$/.test(nimPaymentAmountLunaRaw) && BigInt(nimPaymentAmountLunaRaw) > 0n
   ? BigInt(nimPaymentAmountLunaRaw)
+  : null
+
+const quoteTtlSeconds = /^\d+$/.test(quoteTtlRaw) && Number(quoteTtlRaw) > 0 ? Number(quoteTtlRaw) : null
+const serviceFeeBps = /^\d+$/.test(serviceFeeBpsRaw) && Number(serviceFeeBpsRaw) >= 0 && Number(serviceFeeBpsRaw) <= 10_000
+  ? Number(serviceFeeBpsRaw)
+  : null
+const minPaymentLuna = /^\d+$/.test(minPaymentLunaRaw) && BigInt(minPaymentLunaRaw) > 0n
+  ? BigInt(minPaymentLunaRaw)
+  : null
+const fixedServiceFeeLuna = /^\d+$/.test(fixedServiceFeeLunaRaw) && BigInt(fixedServiceFeeLunaRaw) >= 0n
+  ? BigInt(fixedServiceFeeLunaRaw)
   : null
 
 if (!polygonRpcUrl) {
@@ -26,8 +43,28 @@ if (!/^\d+$/.test(liveRelayMaxAttemptsRaw) || Number(liveRelayMaxAttemptsRaw) < 
   throw new Error('NIMFUEL_LIVE_RELAY_MAX_ATTEMPTS must be a positive integer.')
 }
 
+if (!/^\d+$/.test(relayReservationGraceRaw) || Number(relayReservationGraceRaw) < 1) {
+  throw new Error('NIMFUEL_RELAY_RESERVATION_GRACE_SECONDS must be a positive integer.')
+}
+
 if (liveBroadcastTtlRaw !== null && (!/^\d+$/.test(liveBroadcastTtlRaw) || Number(liveBroadcastTtlRaw) < 1)) {
   throw new Error('NIMFUEL_LIVE_BROADCAST_TTL_SECONDS must be a positive integer when configured.')
+}
+
+if (quoteTtlSeconds === null) {
+  throw new Error('NIMFUEL_QUOTE_TTL_SECONDS must be a positive integer.')
+}
+
+if (serviceFeeBps === null) {
+  throw new Error('NIMFUEL_SERVICE_FEE_BPS must be an integer from 0 to 10000.')
+}
+
+if (minPaymentLuna === null) {
+  throw new Error('NIMFUEL_MIN_PAYMENT_LUNA must be a positive integer.')
+}
+
+if (fixedServiceFeeLuna === null) {
+  throw new Error('NIMFUEL_FIXED_SERVICE_FEE_LUNA must be a non-negative integer.')
 }
 
 export const config = {
@@ -44,10 +81,19 @@ export const config = {
   nimVerificationApiKeyConfigured: Boolean(process.env.NIMIQ_VERIFICATION_API_KEY?.trim()),
   priceApiUrl: process.env.PRICE_API_URL?.trim() || null,
   priceApiKeyConfigured: Boolean(process.env.PRICE_API_KEY?.trim()),
+  priceNimTickerId: process.env.PRICE_NIM_TICKER_ID?.trim() || 'nim-nimiq',
+  pricePolTickerId: process.env.PRICE_POL_TICKER_ID?.trim() || 'matic-polygon',
+  quoteTtlSeconds,
+  serviceFeeBps,
+  minPaymentLuna,
+  fixedServiceFeeLuna,
+  adminApiToken,
+  refundSenderAddress: process.env.NIMFUEL_REFUND_SENDER_ADDRESS?.trim() || null,
   databaseConfigured: Boolean(process.env.DATABASE_URL?.trim()),
   liveBroadcastEnabled: process.env.NIMFUEL_ENABLE_LIVE_BROADCAST?.trim().toLowerCase() === 'true',
   liveBroadcastTtlSeconds: liveBroadcastTtlRaw === null ? null : Number(liveBroadcastTtlRaw),
   liveRelayMaxAttempts: Number(liveRelayMaxAttemptsRaw),
+  relayReservationGraceSeconds: Number(relayReservationGraceRaw),
 } as const
 
 let liveBroadcastExpiresAt: number | null = null

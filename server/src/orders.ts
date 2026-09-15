@@ -1,8 +1,10 @@
 import { randomUUID } from 'node:crypto'
+import { formatUnits } from 'viem'
 import { pool, withTransaction } from './db.js'
 import type { PoolClient } from 'pg'
 import { config } from './config.js'
 import { encodeNimReference, formatNimAddress } from './nim.js'
+import { formatUsdNanos } from './prices.js'
 
 export type OrderState =
   | 'AWAITING_NIM_PAYMENT'
@@ -13,6 +15,8 @@ export type OrderState =
   | 'RELAY_SUBMITTED'
   | 'RELAY_FAILED'
   | 'RECOVERY_REQUIRED'
+  | 'REFUND_PENDING'
+  | 'REFUNDED'
   | 'FULFILLED'
 
 export type RelayAttemptStatus =
@@ -44,6 +48,28 @@ export type NimfuelOrder = {
   relayBlockNumber?: number
   relaySubmittedAt?: number
   relayVerifiedAt?: number
+  quoteId?: string
+  quoteAuthorizationDigest?: string
+  quoteGasEstimate?: bigint
+  quoteGasPrice?: bigint
+  quoteEstimatedFeeRaw?: bigint
+  quotePolPriceUsdNanos?: bigint
+  quoteNimPriceUsdNanos?: bigint
+  quoteServiceFeeBps?: number
+  quoteServiceFeeLuna?: bigint
+  quotePaymentAmountLuna?: bigint
+  quoteRelayCostLuna?: bigint
+  quotePriceSource?: string
+  quoteCreatedAt?: number
+  quoteExpiresAt?: number
+  refundRecipient?: string
+  refundAmountLuna?: bigint
+  refundRequestedAt?: number
+  refundTxHash?: string
+  refundBlockNumber?: number
+  refundConfirmations?: number
+  refundVerifiedAt?: number
+  refundLastError?: string
   lastError?: string
 }
 
@@ -86,6 +112,35 @@ export type RelayReservation = {
   attempt: RelayAttempt
 }
 
+export type NimQuote = {
+  id: string
+  authorizationDigest: string
+  userAddress: string
+  recipient: string
+  amountRaw: bigint
+  nonce: bigint
+  deadline: bigint
+  decimals: number
+  functionSignature: string
+  signature: string
+  executeData: string
+  gasEstimate: bigint
+  gasPrice: bigint
+  estimatedFeeRaw: bigint
+  relayerAddress: string
+  polPriceUsdNanos: bigint
+  nimPriceUsdNanos: bigint
+  serviceFeeBps: number
+  serviceFeeLuna: bigint
+  relayCostLuna: bigint
+  paymentAmountLuna: bigint
+  priceSource: string
+  createdAt: number
+  expiresAt: number
+  consumedAt?: number
+  consumedOrderId?: string
+}
+
 export type RelayOutcome = {
   status: Extract<RelayAttemptStatus, 'SUBMITTED' | 'CONFIRMED' | 'FAILED' | 'RECOVERY_REQUIRED'>
   receiptStatus?: string | null
@@ -121,6 +176,28 @@ type DbOrderRow = {
   relay_block_number: DbNumeric | null
   relay_submitted_at: DbTimestamp | null
   relay_verified_at: DbTimestamp | null
+  quote_id: string | null
+  quote_authorization_digest: string | null
+  quote_gas_estimate: DbNumeric | null
+  quote_gas_price: DbNumeric | null
+  quote_estimated_fee_raw: DbNumeric | null
+  quote_pol_price_usd_nanos: DbNumeric | null
+  quote_nim_price_usd_nanos: DbNumeric | null
+  quote_service_fee_bps: number | null
+  quote_service_fee_luna: DbNumeric | null
+  quote_payment_amount_luna: DbNumeric | null
+  quote_relay_cost_luna: DbNumeric | null
+  quote_price_source: string | null
+  quote_created_at: DbTimestamp | null
+  quote_expires_at: DbTimestamp | null
+  refund_recipient: string | null
+  refund_amount_luna: DbNumeric | null
+  refund_requested_at: DbTimestamp | null
+  refund_tx_hash: string | null
+  refund_block_number: DbNumeric | null
+  refund_confirmations: number | null
+  refund_verified_at: DbTimestamp | null
+  refund_last_error: string | null
   last_error: string | null
   updated_at: DbTimestamp
 }
@@ -154,6 +231,35 @@ type DbRelayAttemptRow = {
   confirmed_at: DbTimestamp | null
   last_error: string | null
   updated_at: DbTimestamp
+}
+
+type DbQuoteRow = {
+  id: string
+  authorization_digest: string
+  user_address: string
+  recipient: string
+  amount_raw: DbNumeric
+  nonce: DbNumeric
+  deadline: DbNumeric
+  decimals: number
+  function_signature: string
+  signature: string
+  execute_data: string
+  gas_estimate: DbNumeric
+  gas_price: DbNumeric
+  estimated_fee_raw: DbNumeric
+  relayer_address: string
+  pol_price_usd_nanos: DbNumeric
+  nim_price_usd_nanos: DbNumeric
+  service_fee_bps: number
+  service_fee_luna: DbNumeric
+  relay_cost_luna: DbNumeric
+  payment_amount_luna: DbNumeric
+  price_source: string
+  created_at: DbTimestamp
+  expires_at: DbTimestamp
+  consumed_at: DbTimestamp | null
+  consumed_order_id: string | null
 }
 
 function toBigInt(value: unknown) {
@@ -200,6 +306,28 @@ function mapOrder(row: DbOrderRow): NimfuelOrder {
     relayBlockNumber: optionalNumber(row.relay_block_number),
     relaySubmittedAt: row.relay_submitted_at ? toMillis(row.relay_submitted_at) : undefined,
     relayVerifiedAt: row.relay_verified_at ? toMillis(row.relay_verified_at) : undefined,
+    quoteId: row.quote_id || undefined,
+    quoteAuthorizationDigest: row.quote_authorization_digest || undefined,
+    quoteGasEstimate: optionalBigInt(row.quote_gas_estimate),
+    quoteGasPrice: optionalBigInt(row.quote_gas_price),
+    quoteEstimatedFeeRaw: optionalBigInt(row.quote_estimated_fee_raw),
+    quotePolPriceUsdNanos: optionalBigInt(row.quote_pol_price_usd_nanos),
+    quoteNimPriceUsdNanos: optionalBigInt(row.quote_nim_price_usd_nanos),
+    quoteServiceFeeBps: row.quote_service_fee_bps ?? undefined,
+    quoteServiceFeeLuna: optionalBigInt(row.quote_service_fee_luna),
+    quotePaymentAmountLuna: optionalBigInt(row.quote_payment_amount_luna),
+    quoteRelayCostLuna: optionalBigInt(row.quote_relay_cost_luna),
+    quotePriceSource: row.quote_price_source || undefined,
+    quoteCreatedAt: row.quote_created_at ? toMillis(row.quote_created_at) : undefined,
+    quoteExpiresAt: row.quote_expires_at ? toMillis(row.quote_expires_at) : undefined,
+    refundRecipient: row.refund_recipient || undefined,
+    refundAmountLuna: optionalBigInt(row.refund_amount_luna),
+    refundRequestedAt: row.refund_requested_at ? toMillis(row.refund_requested_at) : undefined,
+    refundTxHash: row.refund_tx_hash || undefined,
+    refundBlockNumber: optionalNumber(row.refund_block_number),
+    refundConfirmations: row.refund_confirmations ?? undefined,
+    refundVerifiedAt: row.refund_verified_at ? toMillis(row.refund_verified_at) : undefined,
+    refundLastError: row.refund_last_error || undefined,
     lastError: row.last_error || undefined,
   }
 }
@@ -236,6 +364,42 @@ function mapRelayAttempt(row: DbRelayAttemptRow): RelayAttempt {
   }
 }
 
+function mapQuote(row: DbQuoteRow): NimQuote {
+  return {
+    id: row.id,
+    authorizationDigest: row.authorization_digest,
+    userAddress: row.user_address,
+    recipient: row.recipient,
+    amountRaw: toBigInt(row.amount_raw),
+    nonce: toBigInt(row.nonce),
+    deadline: toBigInt(row.deadline),
+    decimals: row.decimals,
+    functionSignature: row.function_signature,
+    signature: row.signature,
+    executeData: row.execute_data,
+    gasEstimate: toBigInt(row.gas_estimate),
+    gasPrice: toBigInt(row.gas_price),
+    estimatedFeeRaw: toBigInt(row.estimated_fee_raw),
+    relayerAddress: row.relayer_address,
+    polPriceUsdNanos: toBigInt(row.pol_price_usd_nanos),
+    nimPriceUsdNanos: toBigInt(row.nim_price_usd_nanos),
+    serviceFeeBps: row.service_fee_bps,
+    serviceFeeLuna: toBigInt(row.service_fee_luna),
+    relayCostLuna: toBigInt(row.relay_cost_luna),
+    paymentAmountLuna: toBigInt(row.payment_amount_luna),
+    priceSource: row.price_source,
+    createdAt: toMillis(row.created_at),
+    expiresAt: toMillis(row.expires_at),
+    consumedAt: row.consumed_at ? toMillis(row.consumed_at) : undefined,
+    consumedOrderId: row.consumed_order_id || undefined,
+  }
+}
+
+export async function getQuoteById(id: string) {
+  const result = await pool.query<DbQuoteRow>('SELECT * FROM quotes WHERE id = $1', [id])
+  return result.rows[0] ? mapQuote(result.rows[0]) : null
+}
+
 function isUniqueViolation(error: unknown) {
   return typeof error === 'object' && error !== null && 'code' in error && error.code === '23505'
 }
@@ -244,6 +408,143 @@ export class DuplicateNimPaymentError extends Error {
   constructor() {
     super('This NIM payment transaction has already been used by another order.')
     this.name = 'DuplicateNimPaymentError'
+  }
+}
+
+export class DuplicateRefundError extends Error {
+  constructor() {
+    super('This NIM refund transaction has already been used by another order.')
+    this.name = 'DuplicateRefundError'
+  }
+}
+
+export async function createQuote(input: {
+  authorization: Omit<RelayAuthorizationRecord, 'orderId'>
+  polPriceUsdNanos: bigint
+  nimPriceUsdNanos: bigint
+  serviceFeeBps: number
+  serviceFeeLuna: bigint
+  relayCostLuna: bigint
+  paymentAmountLuna: bigint
+  priceSource: string
+  ttlSeconds: number
+}) {
+  const id = `q_${randomUUID().replaceAll('-', '')}`
+  const createdAt = Date.now()
+  const expiresAt = createdAt + input.ttlSeconds * 1000
+  const result = await pool.query<DbQuoteRow>(
+    `INSERT INTO quotes (
+      id,
+      authorization_digest,
+      user_address,
+      recipient,
+      amount_raw,
+      nonce,
+      deadline,
+      decimals,
+      function_signature,
+      signature,
+      execute_data,
+      gas_estimate,
+      gas_price,
+      estimated_fee_raw,
+      relayer_address,
+      pol_price_usd_nanos,
+      nim_price_usd_nanos,
+      service_fee_bps,
+      service_fee_luna,
+      relay_cost_luna,
+      payment_amount_luna,
+      price_source,
+      created_at,
+      expires_at
+    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24)
+    ON CONFLICT (authorization_digest) DO UPDATE SET
+      user_address = EXCLUDED.user_address,
+      recipient = EXCLUDED.recipient,
+      amount_raw = EXCLUDED.amount_raw,
+      nonce = EXCLUDED.nonce,
+      deadline = EXCLUDED.deadline,
+      decimals = EXCLUDED.decimals,
+      function_signature = EXCLUDED.function_signature,
+      signature = EXCLUDED.signature,
+      execute_data = EXCLUDED.execute_data,
+      gas_estimate = EXCLUDED.gas_estimate,
+      gas_price = EXCLUDED.gas_price,
+      estimated_fee_raw = EXCLUDED.estimated_fee_raw,
+      relayer_address = EXCLUDED.relayer_address,
+      pol_price_usd_nanos = EXCLUDED.pol_price_usd_nanos,
+      nim_price_usd_nanos = EXCLUDED.nim_price_usd_nanos,
+      service_fee_bps = EXCLUDED.service_fee_bps,
+      service_fee_luna = EXCLUDED.service_fee_luna,
+      relay_cost_luna = EXCLUDED.relay_cost_luna,
+      payment_amount_luna = EXCLUDED.payment_amount_luna,
+      price_source = EXCLUDED.price_source,
+      created_at = EXCLUDED.created_at,
+      expires_at = EXCLUDED.expires_at
+    WHERE quotes.consumed_order_id IS NULL
+    RETURNING *`,
+    [
+      id,
+      input.authorization.authorizationDigest,
+      input.authorization.userAddress,
+      input.authorization.recipient,
+      input.authorization.amountRaw.toString(),
+      input.authorization.nonce.toString(),
+      input.authorization.deadline.toString(),
+      input.authorization.decimals,
+      input.authorization.functionSignature,
+      input.authorization.signature,
+      input.authorization.executeData,
+      input.authorization.gasEstimate.toString(),
+      input.authorization.gasPrice.toString(),
+      input.authorization.estimatedFeeRaw.toString(),
+      input.authorization.relayerAddress,
+      input.polPriceUsdNanos.toString(),
+      input.nimPriceUsdNanos.toString(),
+      input.serviceFeeBps,
+      input.serviceFeeLuna.toString(),
+      input.relayCostLuna.toString(),
+      input.paymentAmountLuna.toString(),
+      input.priceSource,
+      new Date(createdAt),
+      new Date(expiresAt),
+    ],
+  )
+  if (result.rows[0]) return mapQuote(result.rows[0])
+  const existing = await pool.query<{ consumed_order_id: string | null }>(
+    'SELECT consumed_order_id FROM quotes WHERE authorization_digest = $1',
+    [input.authorization.authorizationDigest],
+  )
+  if (existing.rows[0]?.consumed_order_id) throw new Error('This authorization has already created an order.')
+  throw new Error('The authorization quote could not be persisted.')
+}
+
+export function publicQuote(quote: NimQuote) {
+  return {
+    quoteId: quote.id,
+    authorizationDigest: quote.authorizationDigest,
+    userAddress: quote.userAddress,
+    recipient: quote.recipient,
+    amountRaw: quote.amountRaw.toString(),
+    nonce: quote.nonce.toString(),
+    deadline: quote.deadline.toString(),
+    gasEstimate: quote.gasEstimate.toString(),
+    gasPrice: quote.gasPrice.toString(),
+    estimatedFeeRaw: quote.estimatedFeeRaw.toString(),
+    estimatedFeePol: formatUnits(quote.estimatedFeeRaw, 18),
+    polPriceUsd: formatUsdNanos(quote.polPriceUsdNanos),
+    nimPriceUsd: formatUsdNanos(quote.nimPriceUsdNanos),
+    serviceFeeBps: quote.serviceFeeBps,
+    serviceFeeLuna: quote.serviceFeeLuna.toString(),
+    serviceFeeNim: formatUnits(quote.serviceFeeLuna, 5),
+    relayCostLuna: quote.relayCostLuna.toString(),
+    relayCostNim: formatUnits(quote.relayCostLuna, 5),
+    paymentAmountLuna: quote.paymentAmountLuna.toString(),
+    paymentAmountNim: formatUnits(quote.paymentAmountLuna, 5),
+    priceSource: quote.priceSource,
+    createdAt: new Date(quote.createdAt).toISOString(),
+    expiresAt: new Date(quote.expiresAt).toISOString(),
   }
 }
 
@@ -292,9 +593,117 @@ export async function createOrder(input: {
   return mapOrder(result.rows[0])
 }
 
+export async function createOrderFromQuote(input: {
+  nimAddress: string
+  paymentRecipient: string
+  quoteId: string
+}) {
+  return await withTransaction(async client => {
+    const quoteResult = await client.query<DbQuoteRow>('SELECT * FROM quotes WHERE id = $1 FOR UPDATE', [input.quoteId])
+    const quoteRow = quoteResult.rows[0]
+    if (!quoteRow) throw new Error('Quote was not found.')
+
+    const quote = mapQuote(quoteRow)
+    if (quote.consumedOrderId) throw new Error('This quote has already been used.')
+    if (Date.now() >= quote.expiresAt) throw new Error('This quote has expired. Prepare a new quote.')
+
+    const id = `nf_${randomUUID().replaceAll('-', '')}`
+    const reference = `NIMFUEL:${id}`
+    const now = Date.now()
+    const orderResult = await client.query<DbOrderRow>(
+      `INSERT INTO orders (
+        id,
+        reference,
+        expected_payment_data_hex,
+        nim_address,
+        payment_recipient,
+        payment_amount_luna,
+        evm_address,
+        recipient,
+        amount_raw,
+        state,
+        created_at,
+        expires_at,
+        quote_id,
+        quote_authorization_digest,
+        quote_gas_estimate,
+        quote_gas_price,
+        quote_estimated_fee_raw,
+        quote_pol_price_usd_nanos,
+        quote_nim_price_usd_nanos,
+        quote_service_fee_bps,
+        quote_service_fee_luna,
+        quote_payment_amount_luna,
+        quote_relay_cost_luna,
+        quote_price_source,
+        quote_created_at,
+        quote_expires_at
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'AWAITING_NIM_PAYMENT', $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25)
+      RETURNING *`,
+      [
+        id,
+        reference,
+        encodeNimReference(reference),
+        input.nimAddress,
+        formatNimAddress(input.paymentRecipient),
+        quote.paymentAmountLuna.toString(),
+        quote.userAddress,
+        quote.recipient,
+        quote.amountRaw.toString(),
+        new Date(now),
+        new Date(quote.expiresAt),
+        quote.id,
+        quote.authorizationDigest,
+        quote.gasEstimate.toString(),
+        quote.gasPrice.toString(),
+        quote.estimatedFeeRaw.toString(),
+        quote.polPriceUsdNanos.toString(),
+        quote.nimPriceUsdNanos.toString(),
+        quote.serviceFeeBps,
+        quote.serviceFeeLuna.toString(),
+        quote.paymentAmountLuna.toString(),
+        quote.relayCostLuna.toString(),
+        quote.priceSource,
+        new Date(quote.createdAt),
+        new Date(quote.expiresAt),
+      ],
+    )
+
+    const consumed = await client.query(
+      `UPDATE quotes
+       SET consumed_at = NOW(), consumed_order_id = $2
+       WHERE id = $1 AND consumed_order_id IS NULL`,
+      [quote.id, id],
+    )
+    if (consumed.rowCount !== 1) throw new Error('The quote was consumed before the order could be created.')
+    return mapOrder(orderResult.rows[0])
+  })
+}
+
 export async function getOrder(id: string) {
   const result = await pool.query<DbOrderRow>('SELECT * FROM orders WHERE id = $1', [id])
   return result.rows[0] ? mapOrder(result.rows[0]) : null
+}
+
+export async function getOrderByReference(reference: string) {
+  const result = await pool.query<DbOrderRow>('SELECT * FROM orders WHERE reference = $1', [reference])
+  return result.rows[0] ? mapOrder(result.rows[0]) : null
+}
+
+export async function getRelayAttemptsByOrderId(orderId: string) {
+  const result = await pool.query<DbRelayAttemptRow>(
+    'SELECT * FROM relay_attempts WHERE order_id = $1 ORDER BY created_at ASC',
+    [orderId],
+  )
+  return result.rows.map(mapRelayAttempt)
+}
+
+export async function getRelayAttemptCount(orderId: string) {
+  const result = await pool.query<{ count: string }>(
+    'SELECT COUNT(*)::text AS count FROM relay_attempts WHERE order_id = $1',
+    [orderId],
+  )
+  return Number(result.rows[0]?.count || '0')
 }
 
 export async function markPaymentExpired(orderId: string, message: string) {
@@ -376,7 +785,7 @@ export async function getRelayAttemptByDigest(authorizationDigest: string) {
 
 export async function reserveRelayAttempt(orderId: string, input: RelayAuthorizationRecord): Promise<RelayReservation> {
   try {
-    return await withTransaction(async client => {
+    const reservation = await withTransaction<RelayReservation | null>(async client => {
       await client.query('SELECT pg_advisory_xact_lock($1::bigint)', ['81520314'])
 
       const orderResult = await client.query<DbOrderRow>('SELECT * FROM orders WHERE id = $1 FOR UPDATE', [orderId])
@@ -413,9 +822,20 @@ export async function reserveRelayAttempt(orderId: string, input: RelayAuthoriza
         throw new Error('This NIM payment order has expired before relay execution.')
       }
 
-      const countResult = await client.query<{ count: string }>('SELECT COUNT(*)::text AS count FROM relay_attempts')
+      const countResult = await client.query<{ count: string }>(
+        'SELECT COUNT(*)::text AS count FROM relay_attempts WHERE order_id = $1',
+        [orderId],
+      )
       if (Number(countResult.rows[0]?.count || '0') >= config.liveRelayMaxAttempts) {
-        throw new Error('The configured live relay attempt limit has been reached.')
+        await client.query(
+          `UPDATE orders
+           SET state = 'RECOVERY_REQUIRED',
+               last_error = $2,
+               updated_at = NOW()
+           WHERE id = $1 AND state IN ('NIM_PAYMENT_CONFIRMED', 'RELAY_FAILED')`,
+          [orderId, 'The relay attempt limit was reached. Manual recovery or refund is required.'],
+        )
+        return null
       }
 
       const attemptResult = await client.query<DbRelayAttemptRow>(
@@ -477,6 +897,8 @@ export async function reserveRelayAttempt(orderId: string, input: RelayAuthoriza
         attempt: mapRelayAttempt(attemptResult.rows[0]),
       }
     })
+    if (!reservation) throw new Error('The configured live relay attempt limit has been reached.')
+    return reservation
   } catch (error) {
     if (isUniqueViolation(error)) {
       throw new Error('This relay authorization has already been reserved.')
@@ -539,8 +961,12 @@ export async function recordRelayOutcome(orderId: string, authorizationDigest: s
     if (!attemptResult.rows[0]) throw new Error('Relay attempt was not found.')
 
     const currentAttempt = mapRelayAttempt(attemptResult.rows[0])
+    const currentOrder = await getOrderForClient(client, orderId)
+    if (['REFUND_PENDING', 'REFUNDED'].includes(currentOrder.state)) {
+      if (currentAttempt.status === outcome.status) return { order: currentOrder, attempt: currentAttempt }
+      throw new Error('This relay attempt cannot change after refund processing has started.')
+    }
     if (['CONFIRMED', 'FAILED', 'RECOVERY_REQUIRED'].includes(currentAttempt.status) && currentAttempt.status !== outcome.status) {
-      const currentOrder = await getOrderForClient(client, orderId)
       if (currentOrder.relayAuthorizationDigest !== authorizationDigest) {
         throw new Error('This relay attempt is no longer the current order attempt.')
       }
@@ -607,6 +1033,105 @@ export async function recordRelayOutcome(orderId: string, authorizationDigest: s
   })
 }
 
+export async function requestRefund(orderId: string) {
+  return await withTransaction(async client => {
+    const orderResult = await client.query<DbOrderRow>('SELECT * FROM orders WHERE id = $1 FOR UPDATE', [orderId])
+    const orderRow = orderResult.rows[0]
+    if (!orderRow) throw new Error('Order was not found.')
+
+    const order = mapOrder(orderRow)
+    if (!order.paymentTxHash) throw new Error('A refund can only be requested for a paid order.')
+    if (order.state === 'REFUNDED') throw new Error('This order has already been refunded.')
+    if (order.state === 'FULFILLED') throw new Error('A fulfilled order cannot be refunded.')
+    if (order.state === 'REFUND_PENDING') return order
+    if (!['NIM_PAYMENT_CONFIRMED', 'PAYMENT_EXPIRED', 'RELAY_FAILED', 'RECOVERY_REQUIRED'].includes(order.state)) {
+      throw new Error('This order is not in a refundable state.')
+    }
+
+    const activeAttempt = await client.query<{ status: string }>(
+      `SELECT status FROM relay_attempts
+       WHERE order_id = $1 AND status IN ('BROADCASTING', 'SUBMITTED')
+       LIMIT 1`,
+      [orderId],
+    )
+    if (activeAttempt.rows[0]) throw new Error('Reconcile the pending Polygon relay before requesting a refund.')
+
+    const result = await client.query<DbOrderRow>(
+      `UPDATE orders
+       SET state = 'REFUND_PENDING',
+           refund_recipient = nim_address,
+           refund_amount_luna = payment_amount_luna,
+           refund_requested_at = COALESCE(refund_requested_at, NOW()),
+           refund_last_error = NULL,
+           last_error = NULL,
+           updated_at = NOW()
+       WHERE id = $1 AND state <> 'FULFILLED'
+       RETURNING *`,
+      [orderId],
+    )
+    if (!result.rows[0]) throw new Error('The refund request could not be persisted.')
+    return mapOrder(result.rows[0])
+  })
+}
+
+export async function recordRefundFailure(orderId: string, message: string) {
+  const result = await pool.query<DbOrderRow>(
+    `UPDATE orders
+     SET refund_last_error = $2,
+         last_error = $2,
+         updated_at = NOW()
+     WHERE id = $1 AND state = 'REFUND_PENDING'
+     RETURNING *`,
+    [orderId, message],
+  )
+  return result.rows[0] ? mapOrder(result.rows[0]) : null
+}
+
+export async function confirmRefund(input: {
+  orderId: string
+  txHash: string
+  blockNumber: number
+  confirmations: number
+}) {
+  try {
+    return await withTransaction(async client => {
+      const orderResult = await client.query<DbOrderRow>('SELECT * FROM orders WHERE id = $1 FOR UPDATE', [input.orderId])
+      const orderRow = orderResult.rows[0]
+      if (!orderRow) throw new Error('Order was not found.')
+
+      const existing = mapOrder(orderRow)
+      if (existing.state === 'REFUNDED') {
+        if (existing.refundTxHash === input.txHash) return existing
+        throw new Error('This order has already been refunded with a different transaction.')
+      }
+      if (existing.state !== 'REFUND_PENDING') throw new Error('This order does not have a pending refund.')
+      if (existing.refundTxHash && existing.refundTxHash !== input.txHash) {
+        throw new Error('This order already has a different refund transaction.')
+      }
+
+      const result = await client.query<DbOrderRow>(
+        `UPDATE orders
+         SET state = 'REFUNDED',
+             refund_tx_hash = $2,
+             refund_block_number = $3,
+             refund_confirmations = $4,
+             refund_verified_at = NOW(),
+             refund_last_error = NULL,
+             last_error = NULL,
+             updated_at = NOW()
+         WHERE id = $1 AND state = 'REFUND_PENDING' AND refund_tx_hash IS NULL
+         RETURNING *`,
+        [input.orderId, input.txHash, input.blockNumber, input.confirmations],
+      )
+      if (!result.rows[0]) throw new Error('The refund changed before verification completed.')
+      return mapOrder(result.rows[0])
+    })
+  } catch (error) {
+    if (isUniqueViolation(error)) throw new DuplicateRefundError()
+    throw error
+  }
+}
+
 export async function getOutstandingRelayAttempts() {
   const result = await pool.query<DbRelayAttemptRow>(
     `SELECT * FROM relay_attempts
@@ -630,7 +1155,7 @@ export function publicOrder(order: NimfuelOrder) {
     nimAddress: order.nimAddress,
     paymentRecipient: order.paymentRecipient,
     paymentAmountLuna: order.paymentAmountLuna.toString(),
-    paymentAmountNim: Number(order.paymentAmountLuna) / 100_000,
+    paymentAmountNim: formatUnits(order.paymentAmountLuna, 5),
     evmAddress: order.evmAddress,
     recipient: order.recipient,
     amountRaw: order.amountRaw.toString(),
@@ -646,6 +1171,29 @@ export function publicOrder(order: NimfuelOrder) {
     relayBlockNumber: order.relayBlockNumber ?? null,
     relaySubmittedAt: order.relaySubmittedAt ? new Date(order.relaySubmittedAt).toISOString() : null,
     relayVerifiedAt: order.relayVerifiedAt ? new Date(order.relayVerifiedAt).toISOString() : null,
+    quoteId: order.quoteId || null,
+    quoteAuthorizationDigest: order.quoteAuthorizationDigest || null,
+    quoteGasEstimate: order.quoteGasEstimate?.toString() ?? null,
+    quoteGasPrice: order.quoteGasPrice?.toString() ?? null,
+    quoteEstimatedFeeRaw: order.quoteEstimatedFeeRaw?.toString() ?? null,
+    quotePolPriceUsdNanos: order.quotePolPriceUsdNanos?.toString() ?? null,
+    quoteNimPriceUsdNanos: order.quoteNimPriceUsdNanos?.toString() ?? null,
+    quoteServiceFeeBps: order.quoteServiceFeeBps ?? null,
+    quoteServiceFeeLuna: order.quoteServiceFeeLuna?.toString() ?? null,
+    quotePaymentAmountLuna: order.quotePaymentAmountLuna?.toString() ?? null,
+    quoteRelayCostLuna: order.quoteRelayCostLuna?.toString() ?? null,
+    quotePriceSource: order.quotePriceSource || null,
+    quoteCreatedAt: order.quoteCreatedAt ? new Date(order.quoteCreatedAt).toISOString() : null,
+    quoteExpiresAt: order.quoteExpiresAt ? new Date(order.quoteExpiresAt).toISOString() : null,
+    refundRecipient: order.refundRecipient || null,
+    refundAmountLuna: order.refundAmountLuna?.toString() ?? null,
+    refundAmountNim: order.refundAmountLuna === undefined ? null : formatUnits(order.refundAmountLuna, 5),
+    refundRequestedAt: order.refundRequestedAt ? new Date(order.refundRequestedAt).toISOString() : null,
+    refundTxHash: order.refundTxHash || null,
+    refundBlockNumber: order.refundBlockNumber ?? null,
+    refundConfirmations: order.refundConfirmations ?? null,
+    refundVerifiedAt: order.refundVerifiedAt ? new Date(order.refundVerifiedAt).toISOString() : null,
+    refundLastError: order.refundLastError || null,
     lastError: order.lastError || null,
   }
 }

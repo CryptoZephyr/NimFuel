@@ -23,9 +23,26 @@ The default local state is:
 ```text
 NIMFUEL_ENABLE_LIVE_BROADCAST=false
 NIMFUEL_LIVE_RELAY_MAX_ATTEMPTS=1
+NIMFUEL_RELAY_RESERVATION_GRACE_SECONDS=60
+NIMFUEL_QUOTE_TTL_SECONDS=300
+NIMFUEL_SERVICE_FEE_BPS=0
+NIMFUEL_MIN_PAYMENT_LUNA=1000
+NIMFUEL_FIXED_SERVICE_FEE_LUNA=0
 ```
 
 For a short approved production-like proof, set the live switch to `true`, set `NIMFUEL_LIVE_BROADCAST_TTL_SECONDS` to the required window, restart the server, confirm `/health` reports the live switch enabled, and run one already-paid order. The server disables new broadcasts automatically when the window expires. Set the live switch back to `false` after the receipt is independently verified.
+
+## Quote and recovery API
+
+- `POST /v1/preflight` validates the signed USDT action, reads live POL and NIM prices, and stores a short-lived quote.
+- `POST /v1/orders` consumes a quote and creates one order-specific NIM payment reference.
+- `POST /v1/orders/:id/verify-payment` independently verifies the NIM payment before fulfillment.
+- `POST /v1/relay/execute` uses the stored authorization for a paid order, or accepts a fresh authorization for a failed retry.
+- `GET /v1/admin/orders?orderId=...` and `GET /v1/admin/orders?reference=...` expose protected order and relay-attempt lookup when `ADMIN_API_TOKEN` is configured.
+- `POST /v1/admin/orders/:id/refund` moves an eligible paid order to `REFUND_PENDING` and returns the exact manual refund instruction.
+- `POST /v1/admin/orders/:id/refund/verify` independently verifies the refund transaction and records `REFUNDED`.
+
+Refund sending remains an operator-controlled NIM transfer. The service records the instruction and only marks it refunded after the configured Nimiq verification endpoint confirms the recipient, amount, reference, sender when configured, and confirmation state.
 
 ## Render backend
 

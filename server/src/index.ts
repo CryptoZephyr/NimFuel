@@ -1,24 +1,35 @@
 import { createPublicClient, createWalletClient, formatUnits, http, parseEventLogs, verifyTypedData, type Hex } from 'viem'
 import { privateKeyToAccount } from 'viem/accounts'
+import { timingSafeEqual } from 'node:crypto'
 import { databaseHealth, initializeDatabase, closeDatabase } from './db.js'
 import { armLiveBroadcastWindow, config, isLiveBroadcastEnabled, polygon, POLYGON_CHAIN_ID, POLYGON_USDT_ADDRESS, requireAddress, requireRawAmount, requireUnsignedInteger } from './config.js'
 import {
+  confirmRefund,
   confirmNimPayment,
-  createOrder,
+  createOrderFromQuote,
+  createQuote,
+  getQuoteById,
+  getOrderByReference,
   getOrder,
   getOutstandingRelayAttempts,
+  getRelayAttemptsByOrderId,
+  getRelayAttemptCount,
   getRelayAttemptByDigest,
   markPaymentExpired,
   markPaymentMismatch,
   publicOrder,
+  publicQuote,
+  recordRefundFailure,
   recordRelayOutcome,
   recordRelaySubmission,
+  requestRefund,
   reserveRelayAttempt,
   type NimfuelOrder,
   type RelayAttempt,
   type RelayAuthorizationRecord,
 } from './orders.js'
-import { normalizeNimAddress, normalizeNimTransactionHash, parseNimInteger, readNimiqAccount, readNimiqTransaction, requireNimAddress } from './nim.js'
+import { encodeNimReference, formatNimAddress, normalizeNimAddress, normalizeNimTransactionHash, parseNimInteger, readNimiqAccount, readNimiqTransaction, requireNimAddress } from './nim.js'
+import { calculateNimQuote, formatUsdNanos, readMarketPrices } from './prices.js'
 import { encodeMetaTransaction, encodeTransfer, metaTransactionDigest, metaTransactionDomain, metaTransactionTypes, tokenAbi } from './relay.js'
 
 const publicClient = createPublicClient({ chain: polygon, transport: http(config.polygonRpcUrl) })
@@ -32,11 +43,18 @@ const LIVE_RELAY_MAX_AMOUNT_RAW = 100_000n
 const inFlightRelays = new Map<string, Promise<unknown>>()
 const recoveryInFlight = new Set<string>()
 
+class HttpError extends Error {
+  constructor(public readonly status: number, message: string) {
+    super(message)
+    this.name = 'HttpError'
+  }
+}
+
 function sendJson(response: import('node:http').ServerResponse, status: number, body: unknown) {
   response.writeHead(status, {
     'Content-Type': 'application/json; charset=utf-8',
     'Access-Control-Allow-Origin': allowedOrigin,
-    'Access-Control-Allow-Headers': 'Content-Type',
+    'Access-Control-Allow-Headers': 'Content-Type, Authorization',
     'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
     'Cache-Control': 'no-store',
   })
@@ -45,6 +63,20 @@ function sendJson(response: import('node:http').ServerResponse, status: number, 
 
 function errorMessage(error: unknown) {
   return error instanceof Error ? error.message : 'Request failed.'
+}
+
+function requireAdmin(request: import('node:http').IncomingMessage) {
+  if (!config.adminApiToken) throw new HttpError(503, 'Admin API is not configured.')
+
+  const authorization = request.headers.authorization
+  const prefix = 'Bearer '
+  if (!authorization?.startsWith(prefix)) throw new HttpError(401, 'Admin authorization is required.')
+
+  const supplied = Buffer.from(authorization.slice(prefix.length), 'utf8')
+  const expected = Buffer.from(config.adminApiToken, 'utf8')
+  if (supplied.length !== expected.length || !timingSafeEqual(supplied, expected)) {
+    throw new HttpError(401, 'Admin authorization is invalid.')
+  }
 }
 
 async function readJson(request: import('node:http').IncomingMessage) {
@@ -89,14 +121,24 @@ async function readCapability() {
   }
 }
 
-async function prepareRelay(body: Record<string, unknown>) {
-  const userAddress = requireAddress(body.userAddress, 'userAddress')
-  const recipient = requireAddress(body.recipient, 'recipient')
-  const amountRaw = requireRawAmount(body.amountRaw)
-  const nonce = requireUnsignedInteger(body.nonce, 'nonce')
-  const deadline = requireUnsignedInteger(body.deadline, 'deadline')
-  const functionSignature = body.functionSignature
-  const signature = body.signature
+type RelayPreparationInput = {
+  userAddress: unknown
+  recipient: unknown
+  amountRaw: unknown
+  nonce: unknown
+  deadline: unknown
+  functionSignature: unknown
+  signature: unknown
+}
+
+async function prepareRelayAuthorization(input: RelayPreparationInput) {
+  const userAddress = requireAddress(input.userAddress, 'userAddress')
+  const recipient = requireAddress(input.recipient, 'recipient')
+  const amountRaw = typeof input.amountRaw === 'bigint' ? input.amountRaw : requireRawAmount(input.amountRaw)
+  const nonce = typeof input.nonce === 'bigint' ? input.nonce : requireUnsignedInteger(input.nonce, 'nonce')
+  const deadline = typeof input.deadline === 'bigint' ? input.deadline : requireUnsignedInteger(input.deadline, 'deadline')
+  const functionSignature = input.functionSignature
+  const signature = input.signature
 
   if (typeof functionSignature !== 'string' || !/^0x[0-9a-f]*$/i.test(functionSignature)) {
     throw new Error('functionSignature must be hex data.')
@@ -111,7 +153,7 @@ async function prepareRelay(body: Record<string, unknown>) {
   const now = BigInt(Math.floor(Date.now() / 1000))
   if (deadline <= now) throw new Error('Authorization deadline has expired.')
 
-  const [currentNonce, userBalance, decimals] = await Promise.all([
+  const [currentNonce, userBalance, decimals, userPolBalance] = await Promise.all([
     publicClient.readContract({
       address: POLYGON_USDT_ADDRESS,
       abi: tokenAbi,
@@ -125,6 +167,7 @@ async function prepareRelay(body: Record<string, unknown>) {
       args: [userAddress],
     }),
     publicClient.readContract({ address: POLYGON_USDT_ADDRESS, abi: tokenAbi, functionName: 'decimals' }),
+    publicClient.getBalance({ address: userAddress }),
   ])
 
   if (currentNonce !== nonce) {
@@ -155,6 +198,9 @@ async function prepareRelay(body: Record<string, unknown>) {
     publicClient.getGasPrice(),
     publicClient.getChainId(),
   ])
+  if (chainId !== POLYGON_CHAIN_ID) {
+    throw new Error(`Polygon RPC returned chain ${chainId}, expected ${POLYGON_CHAIN_ID}.`)
+  }
   const estimatedFeeRaw = gasEstimate * gasPrice
   if (relayerBalance < estimatedFeeRaw) {
     throw new Error('Relayer POL balance is below the estimated transaction fee.')
@@ -167,12 +213,14 @@ async function prepareRelay(body: Record<string, unknown>) {
     recipient,
     amountRaw,
     amount: formatUnits(amountRaw, Number(decimals)),
+    userUsdtBalanceRaw: userBalance,
     nonce,
     deadline,
     authorizationDigest: metaTransactionDigest(userAddress, nonce, functionSignature as Hex),
     gasEstimate,
     gasPrice,
     estimatedFeeRaw,
+    userPolBalanceRaw: userPolBalance,
     relayerAddress: relayerAccount.address,
     relayerBalanceRaw: relayerBalance,
     decimals: Number(decimals),
@@ -180,6 +228,18 @@ async function prepareRelay(body: Record<string, unknown>) {
     signature: signature as Hex,
     executeData,
   }
+}
+
+async function prepareRelay(body: Record<string, unknown>) {
+  return await prepareRelayAuthorization({
+    userAddress: body.userAddress,
+    recipient: body.recipient,
+    amountRaw: body.amountRaw,
+    nonce: body.nonce,
+    deadline: body.deadline,
+    functionSignature: body.functionSignature,
+    signature: body.signature,
+  })
 }
 
 function relayResponse(prepared: Awaited<ReturnType<typeof prepareRelay>>) {
@@ -198,6 +258,9 @@ function relayResponse(prepared: Awaited<ReturnType<typeof prepareRelay>>) {
     gasEstimate: prepared.gasEstimate.toString(),
     gasPrice: prepared.gasPrice.toString(),
     estimatedFeeRaw: prepared.estimatedFeeRaw.toString(),
+    estimatedFeePol: formatUnits(prepared.estimatedFeeRaw, 18),
+    userPolBalance: formatUnits(prepared.userPolBalanceRaw, 18),
+    userCanPayGasDirectly: prepared.userPolBalanceRaw >= prepared.estimatedFeeRaw,
     relayerAddress: prepared.relayerAddress,
     relayerBalance: formatUnits(prepared.relayerBalanceRaw, 18),
   }
@@ -205,6 +268,70 @@ function relayResponse(prepared: Awaited<ReturnType<typeof prepareRelay>>) {
 
 async function validateRelay(body: Record<string, unknown>) {
   return relayResponse(await prepareRelay(body))
+}
+
+async function createPreflight(body: Record<string, unknown>) {
+  const prepared = await prepareRelay(body)
+  if (prepared.amountRaw !== LIVE_RELAY_MAX_AMOUNT_RAW) {
+    throw new Error('The current live proof supports exactly 0.1 USDT.')
+  }
+  const prices = await readMarketPrices()
+  const calculation = calculateNimQuote({
+    estimatedFeeRaw: prepared.estimatedFeeRaw,
+    polPriceUsdNanos: prices.pol.usdNanos,
+    nimPriceUsdNanos: prices.nim.usdNanos,
+    serviceFeeBps: config.serviceFeeBps,
+    fixedServiceFeeLuna: config.fixedServiceFeeLuna,
+    minPaymentLuna: config.minPaymentLuna,
+  })
+  const priceSource = `coinpaprika:${prices.nim.tickerId},coinpaprika:${prices.pol.tickerId}`
+  const quote = await createQuote({
+    authorization: {
+      authorizationDigest: prepared.authorizationDigest,
+      nonce: prepared.nonce,
+      deadline: prepared.deadline,
+      userAddress: prepared.userAddress,
+      recipient: prepared.recipient,
+      amountRaw: prepared.amountRaw,
+      decimals: prepared.decimals,
+      functionSignature: prepared.functionSignature,
+      signature: prepared.signature,
+      executeData: prepared.executeData,
+      gasEstimate: prepared.gasEstimate,
+      gasPrice: prepared.gasPrice,
+      estimatedFeeRaw: prepared.estimatedFeeRaw,
+      relayerAddress: prepared.relayerAddress,
+    },
+    polPriceUsdNanos: prices.pol.usdNanos,
+    nimPriceUsdNanos: prices.nim.usdNanos,
+    serviceFeeBps: config.serviceFeeBps,
+    serviceFeeLuna: calculation.serviceFeeLuna,
+    relayCostLuna: calculation.relayCostLuna,
+    paymentAmountLuna: calculation.paymentAmountLuna,
+    priceSource,
+    ttlSeconds: config.quoteTtlSeconds,
+  })
+
+  return {
+    ...relayResponse(prepared),
+    preflight: {
+      userUsdtBalance: formatUnits(prepared.userUsdtBalanceRaw, prepared.decimals),
+      userPolBalance: formatUnits(prepared.userPolBalanceRaw, 18),
+      relayerPolBalance: formatUnits(prepared.relayerBalanceRaw, 18),
+      estimatedFeePol: formatUnits(prepared.estimatedFeeRaw, 18),
+      userCanPayGasDirectly: prepared.userPolBalanceRaw >= prepared.estimatedFeeRaw,
+      relayerCanPayGas: prepared.relayerBalanceRaw >= prepared.estimatedFeeRaw,
+    },
+    quote: {
+      ...publicQuote(quote),
+      relayCostUsd: formatUsdNanos(calculation.estimatedFeeUsdNanos),
+      serviceCostUsd: formatUsdNanos(calculation.serviceCostUsdNanos),
+      priceRetrievedAt: {
+        nim: prices.nim.retrievedAt,
+        pol: prices.pol.retrievedAt,
+      },
+    },
+  }
 }
 
 async function orderForId(orderId: string) {
@@ -233,22 +360,17 @@ async function nimTransactionSenderMatchesOrder(transaction: Awaited<ReturnType<
 
 async function createNimOrder(body: Record<string, unknown>) {
   if (!config.nimRecipient) throw new Error('NIM payment recipient is not configured.')
-  if (!config.nimPaymentAmountLuna) throw new Error('NIM payment amount is not configured.')
 
   const nimAddress = requireNimAddress(body.nimAddress, 'nimAddress')
   const paymentRecipient = requireNimAddress(config.nimRecipient, 'NIM payment recipient')
-  const evmAddress = requireAddress(body.evmAddress, 'evmAddress')
-  const recipient = requireAddress(body.recipient, 'recipient')
-  const amountRaw = requireRawAmount(body.amountRaw)
+  if (typeof body.quoteId !== 'string' || !body.quoteId.trim()) {
+    throw new Error('quoteId is required. Prepare a live preflight quote first.')
+  }
 
-  return publicOrder(await createOrder({
+  return publicOrder(await createOrderFromQuote({
     nimAddress,
     paymentRecipient,
-    paymentAmountLuna: config.nimPaymentAmountLuna,
-    evmAddress,
-    recipient,
-    amountRaw,
-    ttlSeconds: 15 * 60,
+    quoteId: body.quoteId.trim(),
   }))
 }
 
@@ -307,6 +429,97 @@ async function verifyNimPayment(orderId: string, body: Record<string, unknown>) 
   }))
 }
 
+function refundReference(orderId: string) {
+  return `NIMFUEL:REFUND:${orderId}`
+}
+
+function refundInstruction(order: NimfuelOrder) {
+  if (!order.refundRecipient || order.refundAmountLuna === undefined) return null
+  return {
+    recipient: formatNimAddress(order.refundRecipient),
+    amountLuna: order.refundAmountLuna.toString(),
+    amountNim: formatUnits(order.refundAmountLuna, 5),
+    reference: refundReference(order.id),
+  }
+}
+
+async function verifyRefundPayment(orderId: string, body: Record<string, unknown>) {
+  const order = await orderForId(orderId)
+  const txHash = normalizeNimTransactionHash(body.txHash)
+
+  if (order.state === 'REFUNDED') {
+    if (order.refundTxHash === txHash) return order
+    throw new Error('This order has already been refunded with a different transaction.')
+  }
+  if (order.state !== 'REFUND_PENDING') throw new Error('This order does not have a pending refund.')
+  if (!order.refundRecipient || order.refundAmountLuna === undefined) {
+    throw new Error('The refund instruction is incomplete.')
+  }
+  if (!config.nimVerificationEndpoint) throw new Error('NIM verification endpoint is not configured.')
+
+  const transaction = await readNimiqTransaction(config.nimVerificationEndpoint, txHash)
+  const transactionHash = typeof transaction.hash === 'string'
+    ? normalizeNimTransactionHash(transaction.hash)
+    : txHash
+  const blockNumber = parseNimInteger(transaction.blockNumber, 'Nimiq block number')
+  const confirmations = transaction.confirmations === undefined
+    ? 0n
+    : parseNimInteger(transaction.confirmations, 'Nimiq confirmations')
+  const value = parseNimInteger(transaction.value, 'Nimiq transaction value')
+  const to = typeof transaction.to === 'string' ? normalizeNimAddress(transaction.to) : ''
+  const recipientData = normalizeHexData(transaction.recipientData)
+  const expectedData = normalizeHexData(encodeNimReference(refundReference(order.id)))
+  const expectedSender = config.refundSenderAddress
+    ? requireNimAddress(config.refundSenderAddress, 'NIM refund sender')
+    : null
+  const senderMatches = expectedSender === null || await nimTransactionSenderMatchesOrder(transaction, expectedSender)
+  const matchesRefund = transactionHash === txHash
+    && transaction.executionResult === true
+    && blockNumber > 0n
+    && confirmations >= 1n
+    && senderMatches
+    && to === normalizeNimAddress(order.refundRecipient)
+    && value === order.refundAmountLuna
+    && recipientData === expectedData
+
+  if (!matchesRefund) {
+    await recordRefundFailure(orderId, 'The NIM refund did not match the expected sender, recipient, amount, reference, or confirmation state.')
+    throw new Error('NIM refund did not match this order.')
+  }
+
+  if (!Number.isSafeInteger(Number(blockNumber))) throw new Error('Nimiq block number is outside the supported range.')
+  if (!Number.isSafeInteger(Number(confirmations))) throw new Error('Nimiq confirmations are outside the supported range.')
+
+  return await confirmRefund({
+    orderId,
+    txHash,
+    blockNumber: Number(blockNumber),
+    confirmations: Number(confirmations),
+  })
+}
+
+async function adminOrderSnapshot(order: NimfuelOrder) {
+  const attempts = await getRelayAttemptsByOrderId(order.id)
+  return {
+    order: publicOrder(order),
+    relayAttempts: attempts.map(relayResponseFromAttempt),
+    relayAttemptsUsed: attempts.length,
+    relayAttemptsRemaining: Math.max(0, config.liveRelayMaxAttempts - attempts.length),
+    refundInstruction: refundInstruction(order),
+  }
+}
+
+async function adminLookup(request: import('node:http').IncomingMessage, url: URL) {
+  requireAdmin(request)
+  const orderId = url.searchParams.get('orderId')?.trim()
+  const reference = url.searchParams.get('reference')?.trim()
+  if (!orderId && !reference) throw new HttpError(400, 'Provide an orderId or exact reference.')
+
+  const order = orderId ? await orderForId(orderId) : await getOrderByReference(reference!)
+  if (!order) throw new HttpError(404, 'Order was not found.')
+  return await adminOrderSnapshot(order)
+}
+
 const RELAY_RECEIPT_TIMEOUT_MS = 30_000
 
 function requestedAuthorizationDigest(body: Record<string, unknown>) {
@@ -319,6 +532,18 @@ function requestedAuthorizationDigest(body: Record<string, unknown>) {
   } catch {
     return null
   }
+}
+
+function hasRelayAuthorization(body: Record<string, unknown>) {
+  return [
+    body.userAddress,
+    body.recipient,
+    body.amountRaw,
+    body.nonce,
+    body.deadline,
+    body.functionSignature,
+    body.signature,
+  ].every(value => value !== undefined && value !== null)
 }
 
 function relayResponseFromAttempt(attempt: RelayAttempt) {
@@ -519,6 +744,10 @@ async function executeOrderRelay(orderId: string, body: Record<string, unknown>)
       : { valid: true, broadcasted: true, verifiedStateChange: true, order: publicOrder(order) }
   }
 
+  if (['REFUND_PENDING', 'REFUNDED'].includes(order.state)) {
+    throw new Error('This order is in refund processing and cannot be relayed.')
+  }
+
   const requestedDigest = requestedAuthorizationDigest(body)
   if (requestedDigest) {
     const existing = await getRelayAttemptByDigest(requestedDigest)
@@ -542,9 +771,28 @@ async function executeOrderRelay(orderId: string, body: Record<string, unknown>)
     await markPaymentExpired(orderId, 'The order expired before Polygon fulfillment.')
     throw new Error('This NIM payment order has expired before relay execution.')
   }
-  if (!isLiveBroadcastEnabled()) throw new Error('Live broadcast is disabled.')
-
-  const prepared = await prepareRelay(body)
+  let prepared: Awaited<ReturnType<typeof prepareRelay>>
+  if (order.state === 'NIM_PAYMENT_CONFIRMED' && !hasRelayAuthorization(body)) {
+    if (!order.quoteId) throw new Error('This order has no stored authorization quote. Sign a new authorization to continue.')
+    const quote = await getQuoteById(order.quoteId)
+    if (!quote || quote.consumedOrderId !== order.id) {
+      throw new Error('The stored authorization quote could not be recovered. Manual recovery is required.')
+    }
+    prepared = await prepareRelayAuthorization({
+      userAddress: quote.userAddress,
+      recipient: quote.recipient,
+      amountRaw: quote.amountRaw,
+      nonce: quote.nonce,
+      deadline: quote.deadline,
+      functionSignature: quote.functionSignature,
+      signature: quote.signature,
+    })
+  } else {
+    if (order.state === 'RELAY_FAILED' && !hasRelayAuthorization(body)) {
+      throw new Error('A new EIP-712 authorization is required before retrying this failed relay.')
+    }
+    prepared = await prepareRelay(body)
+  }
   if (prepared.userAddress.toLowerCase() !== order.evmAddress.toLowerCase()) {
     throw new Error('The relay authorization user does not match the paid order.')
   }
@@ -554,6 +802,12 @@ async function executeOrderRelay(orderId: string, body: Record<string, unknown>)
   if (prepared.amountRaw !== order.amountRaw) {
     throw new Error('The relay amount does not match the paid order.')
   }
+  if (order.state === 'NIM_PAYMENT_CONFIRMED'
+    && order.quoteAuthorizationDigest
+    && prepared.authorizationDigest !== order.quoteAuthorizationDigest) {
+    throw new Error('The relay authorization does not match the paid quote.')
+  }
+  if (!isLiveBroadcastEnabled()) throw new Error('Live broadcast is disabled.')
 
   const executionKey = `order:${order.id}:${prepared.authorizationDigest}`
   const existing = inFlightRelays.get(executionKey)
@@ -582,6 +836,7 @@ async function recoverOutstandingRelayAttempts() {
     recoveryInFlight.add(attempt.authorizationDigest)
     try {
       if (attempt.status === 'BROADCASTING' && !attempt.txHash) {
+        if (Date.now() - attempt.createdAt < config.relayReservationGraceSeconds * 1000) continue
         await recordRelayOutcome(attempt.orderId, attempt.authorizationDigest, {
           status: 'RECOVERY_REQUIRED',
           error: 'The server recovered a relay reservation without a transaction hash. Manual recovery is required.',
@@ -616,10 +871,13 @@ const server = (await import('node:http')).createServer(async (request, response
         nimRecipientConfigured: Boolean(config.nimRecipient),
         nimVerificationConfigured: Boolean(config.nimVerificationEndpoint),
         nimVerificationApiKeyConfigured: config.nimVerificationApiKeyConfigured,
-        nimPaymentConfigured: Boolean(config.nimPaymentAmountLuna),
+        nimPaymentConfigured: Boolean(config.nimRecipient && config.priceApiUrl),
         orderStorage: 'postgres',
         priceApiConfigured: Boolean(config.priceApiUrl),
         priceApiKeyConfigured: config.priceApiKeyConfigured,
+        quoteConfigured: Boolean(config.priceApiUrl && config.quoteTtlSeconds),
+        adminLookupConfigured: Boolean(config.adminApiToken),
+        refundVerificationConfigured: Boolean(config.nimVerificationEndpoint),
         databaseConfigured: config.databaseConfigured,
         liveBroadcastEnabled: isLiveBroadcastEnabled(),
       })
@@ -628,6 +886,11 @@ const server = (await import('node:http')).createServer(async (request, response
 
     if (request.method === 'GET' && url.pathname === '/v1/relay/capability') {
       sendJson(response, 200, await readCapability())
+      return
+    }
+
+    if (request.method === 'POST' && url.pathname === '/v1/preflight') {
+      sendJson(response, 200, await createPreflight(await readJson(request)))
       return
     }
 
@@ -646,6 +909,35 @@ const server = (await import('node:http')).createServer(async (request, response
       return
     }
 
+    if (request.method === 'GET' && url.pathname === '/v1/admin/orders') {
+      sendJson(response, 200, await adminLookup(request, url))
+      return
+    }
+
+    const adminRefundVerifyMatch = url.pathname.match(/^\/v1\/admin\/orders\/([^/]+)\/refund\/verify$/)
+    if (request.method === 'POST' && adminRefundVerifyMatch) {
+      requireAdmin(request)
+      const order = await verifyRefundPayment(decodeURIComponent(adminRefundVerifyMatch[1]), await readJson(request))
+      sendJson(response, 200, await adminOrderSnapshot(order))
+      return
+    }
+
+    const adminRefundMatch = url.pathname.match(/^\/v1\/admin\/orders\/([^/]+)\/refund$/)
+    if (request.method === 'POST' && adminRefundMatch) {
+      requireAdmin(request)
+      const order = await requestRefund(decodeURIComponent(adminRefundMatch[1]))
+      sendJson(response, 200, await adminOrderSnapshot(order))
+      return
+    }
+
+    const adminOrderMatch = url.pathname.match(/^\/v1\/admin\/orders\/([^/]+)$/)
+    if (request.method === 'GET' && adminOrderMatch) {
+      requireAdmin(request)
+      const order = await orderForId(decodeURIComponent(adminOrderMatch[1]))
+      sendJson(response, 200, await adminOrderSnapshot(order))
+      return
+    }
+
     const orderMatch = url.pathname.match(/^\/v1\/orders\/([^/]+)$/)
     if (request.method === 'GET' && orderMatch) {
       sendJson(response, 200, publicOrder(await orderForId(decodeURIComponent(orderMatch[1]))))
@@ -660,7 +952,7 @@ const server = (await import('node:http')).createServer(async (request, response
 
     sendJson(response, 404, { error: 'Not found.' })
   } catch (error) {
-    sendJson(response, 400, { error: errorMessage(error) })
+    sendJson(response, error instanceof HttpError ? error.status : 400, { error: errorMessage(error) })
   }
 })
 

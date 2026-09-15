@@ -66,9 +66,12 @@ export function encodeNimReference(value: string) {
 }
 
 async function readNimiqData(endpoint: string, method: string, params: unknown[], missingMessage: string) {
+  const headers: Record<string, string> = { Accept: 'application/json', 'Content-Type': 'application/json' }
+  const apiKey = process.env.NIMIQ_VERIFICATION_API_KEY?.trim()
+  if (apiKey) headers['X-API-Key'] = apiKey
   const response = await fetch(endpoint, {
     method: 'POST',
-    headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
+    headers,
     body: JSON.stringify({
       jsonrpc: '2.0',
       id: Date.now(),
