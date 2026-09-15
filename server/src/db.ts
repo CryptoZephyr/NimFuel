@@ -1,10 +1,20 @@
 import { Pool, type PoolClient } from 'pg'
 import { config } from './config.js'
 
-const connectionString = config.databaseUrl.replace(/([?&]sslmode=)require(&|$)/i, '$1verify-full$2')
+const databaseUrl = new URL(config.databaseUrl)
+const databaseName = decodeURIComponent(databaseUrl.pathname.replace(/^\/+/, ''))
+
+if (!databaseName) {
+  throw new Error('DATABASE_URL must include a database name.')
+}
 
 export const pool = new Pool({
-  connectionString,
+  host: databaseUrl.hostname,
+  port: databaseUrl.port ? Number(databaseUrl.port) : 5432,
+  user: decodeURIComponent(databaseUrl.username),
+  password: decodeURIComponent(databaseUrl.password),
+  database: databaseName,
+  ssl: { rejectUnauthorized: true },
   max: 5,
   connectionTimeoutMillis: 10_000,
   idleTimeoutMillis: 30_000,
