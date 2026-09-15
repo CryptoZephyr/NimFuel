@@ -27,4 +27,20 @@ NIMFUEL_LIVE_RELAY_MAX_ATTEMPTS=1
 
 For a short approved production-like proof, set the live switch to `true`, set `NIMFUEL_LIVE_BROADCAST_TTL_SECONDS` to the required window, restart the server, confirm `/health` reports the live switch enabled, and run one already-paid order. The server disables new broadcasts automatically when the window expires. Set the live switch back to `false` after the receipt is independently verified.
 
-No hosting provider has been selected or deployed. The GitHub repository remains empty by request. When a host is chosen, copy the variables from `.env.example` into its secret configuration and use the appropriate Neon branch without committing environment files.
+## Render backend
+
+The backend is deployed as a native Node service on Render.
+
+- Service: `nimfuel-backend`
+- URL: `https://nimfuel-backend.onrender.com`
+- Runtime: native Node
+- Region: Frankfurt
+- Source: private `CryptoZephyr/NimFuel`, branch `main`
+- Root directory: `server`
+- Build command: `npm ci && npm run build`
+- Start command: `node dist/index.js`
+- Health endpoint: `/health`
+- Storage: Neon PostgreSQL
+- Live broadcast: disabled
+
+Secrets are configured in Render's environment and are not committed. The public app still needs its own hosting configuration and must point `PUBLIC_API_BASE_URL` at the backend URL above.
