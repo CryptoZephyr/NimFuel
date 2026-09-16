@@ -3,6 +3,7 @@
 .env.*
 !.env.example
 .neon
+/.codex-remote-attachments/
 
 node_modules/
 dist/

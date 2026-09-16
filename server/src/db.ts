@@ -151,8 +151,11 @@ const schemaStatements = [
   )`,
   `CREATE INDEX IF NOT EXISTS orders_state_idx ON orders (state)`,
   `CREATE INDEX IF NOT EXISTS orders_expires_at_idx ON orders (expires_at)`,
+  `CREATE INDEX IF NOT EXISTS orders_evm_address_created_at_idx ON orders (LOWER(evm_address), created_at DESC)`,
+  `CREATE INDEX IF NOT EXISTS orders_updated_at_idx ON orders (updated_at DESC)`,
   `CREATE INDEX IF NOT EXISTS relay_attempts_order_id_idx ON relay_attempts (order_id)`,
   `CREATE INDEX IF NOT EXISTS relay_attempts_status_idx ON relay_attempts (status)`,
+  `CREATE INDEX IF NOT EXISTS relay_attempts_updated_at_idx ON relay_attempts (updated_at DESC)`,
   `ALTER TABLE orders ADD COLUMN IF NOT EXISTS quote_id TEXT UNIQUE`,
   `ALTER TABLE orders ADD COLUMN IF NOT EXISTS quote_authorization_digest TEXT`,
   `ALTER TABLE orders ADD COLUMN IF NOT EXISTS quote_gas_estimate NUMERIC(78, 0)`,
@@ -192,6 +195,7 @@ const schemaStatements = [
   `CREATE INDEX IF NOT EXISTS quotes_expires_at_idx ON quotes (expires_at)`,
   `INSERT INTO schema_migrations (version) VALUES (1) ON CONFLICT (version) DO NOTHING`,
   `INSERT INTO schema_migrations (version) VALUES (2) ON CONFLICT (version) DO NOTHING`,
+  `INSERT INTO schema_migrations (version) VALUES (3) ON CONFLICT (version) DO NOTHING`,
 ] as const
 
 export async function initializeDatabase() {

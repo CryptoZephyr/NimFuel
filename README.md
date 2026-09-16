@@ -19,6 +19,8 @@ Paid orders persist through refreshes. A failed relay can be retried against the
 - `app/` is the Vite frontend and Nimiq Pay mini-app surface.
 - `server/` is the native Node API, relay worker, quote service, and durable order store.
 - `DEPLOYMENT.md` documents the Neon and Render configuration.
+- `ROADMAP.md` records the current Stage 2 boundary and later product stages.
+- `RUNBOOK.md` documents Stage 2 operations, alerts, recovery, and release checks.
 - `.env.example` lists configuration names without values.
 
 ## Local setup
@@ -56,9 +58,12 @@ npm --prefix app run build
 npm --prefix server run build
 npm --prefix server run test:quote
 npm --prefix server run test:durable
+npm --prefix server run test:stage2
 ```
 
-The durable smoke test needs the server's local database and verification configuration. Build and test output is evidence for the local checkout only. It does not replace a live wallet flow, a Polygon receipt, or an independent Nimiq verification result.
+The durable and Stage 2 smoke tests need the server's local database and verification configuration. Build and test output is evidence for the local checkout only. It does not replace a live wallet flow, a Polygon receipt, or an independent Nimiq verification result.
+
+Stage 2 adds active dependency health checks, optional alerts, price-source redundancy, durable order history, protected operational metrics, rate limits, and a recovery runbook. Read [RUNBOOK.md](RUNBOOK.md) before configuring a hosted service.
 
 ## Deployment
 
@@ -68,7 +73,7 @@ The current hosted surfaces are:
 - API: <https://nimfuel-backend.onrender.com>
 - API health: <https://nimfuel-backend.onrender.com/health>
 
-The API runs as a native Node service with Neon PostgreSQL. The frontend is a static Vite build. See [DEPLOYMENT.md](DEPLOYMENT.md) for the provider settings and live relay controls.
+The API runs as a native Node service with Neon PostgreSQL. The frontend is a static Vite build. See [DEPLOYMENT.md](DEPLOYMENT.md) for provider settings and live relay controls. A pushed commit is not hosted evidence until the provider has redeployed it and the hosted health and wallet flow have been checked.
 
 ## Security boundaries
 
@@ -77,6 +82,8 @@ The API runs as a native Node service with Neon PostgreSQL. The frontend is a st
 - The server validates the signature and live token state before quoting or relaying.
 - NIM payment is independently matched to the order before Polygon fulfillment is unlocked.
 - Relay attempts are durable and capped. A failed order remains recoverable instead of silently charging again.
+- Dependency health is exposed publicly in summary form and in detail behind the admin token. Optional alerts never include private keys.
+- Rate limits, origin checks, and bounded pricing fallback reduce accidental and abusive load. The in-process rate limiter should be paired with provider-level protection for a public production service.
 - Never commit `.env`, `.env.local`, private keys, API keys, database URLs, or wallet recovery material.
 
 ## License

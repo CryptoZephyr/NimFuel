@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto'
 import { formatUnits } from 'viem'
 import { pool, withTransaction } from './db.js'
 import type { PoolClient } from 'pg'
-import { config } from './config.js'
+import { config, USDT_DECIMALS } from './config.js'
 import { encodeNimReference, formatNimAddress } from './nim.js'
 import { formatUsdNanos } from './prices.js'
 
@@ -39,6 +39,7 @@ export type NimfuelOrder = {
   state: OrderState
   createdAt: number
   expiresAt: number
+  updatedAt: number
   paymentTxHash?: string
   paymentBlockNumber?: number
   paymentConfirmations?: number
@@ -297,6 +298,7 @@ function mapOrder(row: DbOrderRow): NimfuelOrder {
     state: row.state as OrderState,
     createdAt: toMillis(row.created_at),
     expiresAt: toMillis(row.expires_at),
+    updatedAt: toMillis(row.updated_at),
     paymentTxHash: row.payment_tx_hash || undefined,
     paymentBlockNumber: optionalNumber(row.payment_block_number),
     paymentConfirmations: row.payment_confirmations ?? undefined,
@@ -706,6 +708,17 @@ export async function getOrder(id: string) {
 export async function getOrderByReference(reference: string) {
   const result = await pool.query<DbOrderRow>('SELECT * FROM orders WHERE reference = $1', [reference])
   return result.rows[0] ? mapOrder(result.rows[0]) : null
+}
+
+export async function getOrdersByEvmAddress(evmAddress: string, limit: number) {
+  const result = await pool.query<DbOrderRow>(
+    `SELECT * FROM orders
+     WHERE LOWER(evm_address) = LOWER($1)
+     ORDER BY created_at DESC
+     LIMIT $2`,
+    [evmAddress, limit],
+  )
+  return result.rows.map(mapOrder)
 }
 
 export async function getRelayAttemptsByOrderId(orderId: string) {
@@ -1159,6 +1172,73 @@ export async function getOutstandingRelayAttempts() {
   return result.rows.map(mapRelayAttempt)
 }
 
+export async function getOrdersReadyForAutoRefund(afterSeconds: number) {
+  const result = await pool.query<DbOrderRow>(
+    `SELECT * FROM orders
+     WHERE state = 'RECOVERY_REQUIRED'
+       AND payment_tx_hash IS NOT NULL
+       AND refund_requested_at IS NULL
+       AND updated_at <= NOW() - ($1::double precision * INTERVAL '1 second')
+     ORDER BY updated_at ASC
+     LIMIT 100`,
+    [afterSeconds],
+  )
+  return result.rows.map(mapOrder)
+}
+
+export async function getOperationalMetrics() {
+  const [ordersByState, relayByStatus, totals, relayTotals, lastActivity] = await Promise.all([
+    pool.query<{ state: string; count: string }>('SELECT state, COUNT(*)::text AS count FROM orders GROUP BY state ORDER BY state'),
+    pool.query<{ status: string; count: string }>('SELECT status, COUNT(*)::text AS count FROM relay_attempts GROUP BY status ORDER BY status'),
+    pool.query<{ total: string; paid: string; fulfilled: string; recovered: string; refunded: string }>(
+      `SELECT
+         COUNT(*)::text AS total,
+         COUNT(*) FILTER (WHERE payment_tx_hash IS NOT NULL)::text AS paid,
+         COUNT(*) FILTER (WHERE state = 'FULFILLED')::text AS fulfilled,
+         COUNT(*) FILTER (WHERE state = 'RECOVERY_REQUIRED')::text AS recovered,
+         COUNT(*) FILTER (WHERE state = 'REFUNDED')::text AS refunded
+       FROM orders`,
+    ),
+    pool.query<{ total: string; confirmed: string; failed: string; gas_used: string; estimated_fee: string }>(
+      `SELECT
+         COUNT(*)::text AS total,
+         COUNT(*) FILTER (WHERE status = 'CONFIRMED')::text AS confirmed,
+         COUNT(*) FILTER (WHERE status IN ('FAILED', 'RECOVERY_REQUIRED'))::text AS failed,
+         COALESCE(SUM(gas_used), 0)::text AS gas_used,
+         COALESCE(SUM(estimated_fee_raw), 0)::text AS estimated_fee
+       FROM relay_attempts`,
+    ),
+    pool.query<{ updated_at: DbTimestamp | null }>('SELECT MAX(updated_at) AS updated_at FROM orders'),
+  ])
+
+  const byState = Object.fromEntries(ordersByState.rows.map(row => [row.state, Number(row.count)]))
+  const byStatus = Object.fromEntries(relayByStatus.rows.map(row => [row.status, Number(row.count)]))
+  const orderTotals = totals.rows[0]
+  const relaySummary = relayTotals.rows[0]
+  const latest = lastActivity.rows[0]?.updated_at
+
+  return {
+    generatedAt: new Date().toISOString(),
+    orders: {
+      total: Number(orderTotals?.total || '0'),
+      paid: Number(orderTotals?.paid || '0'),
+      fulfilled: Number(orderTotals?.fulfilled || '0'),
+      recoveryRequired: Number(orderTotals?.recovered || '0'),
+      refunded: Number(orderTotals?.refunded || '0'),
+      byState,
+    },
+    relayAttempts: {
+      total: Number(relaySummary?.total || '0'),
+      confirmed: Number(relaySummary?.confirmed || '0'),
+      failedOrRecovery: Number(relaySummary?.failed || '0'),
+      byStatus,
+      gasUsedRaw: relaySummary?.gas_used || '0',
+      estimatedFeeRaw: relaySummary?.estimated_fee || '0',
+    },
+    lastOrderActivityAt: latest ? new Date(toMillis(latest)).toISOString() : null,
+  }
+}
+
 async function getOrderForClient(client: PoolClient, orderId: string) {
   const result = await client.query<DbOrderRow>('SELECT * FROM orders WHERE id = $1 FOR UPDATE', [orderId])
   if (!result.rows[0]) throw new Error('Order was not found.')
@@ -1180,6 +1260,7 @@ export function publicOrder(order: NimfuelOrder) {
     state: order.state,
     createdAt: new Date(order.createdAt).toISOString(),
     expiresAt: new Date(order.expiresAt).toISOString(),
+    updatedAt: new Date(order.updatedAt).toISOString(),
     paymentTxHash: order.paymentTxHash || null,
     paymentBlockNumber: order.paymentBlockNumber ?? null,
     paymentConfirmations: order.paymentConfirmations ?? null,
@@ -1212,6 +1293,26 @@ export function publicOrder(order: NimfuelOrder) {
     refundConfirmations: order.refundConfirmations ?? null,
     refundVerifiedAt: order.refundVerifiedAt ? new Date(order.refundVerifiedAt).toISOString() : null,
     refundLastError: order.refundLastError || null,
+    lastError: order.lastError || null,
+  }
+}
+
+export function publicOrderHistory(order: NimfuelOrder) {
+  return {
+    orderId: order.id,
+    reference: order.reference,
+    state: order.state,
+    createdAt: new Date(order.createdAt).toISOString(),
+    updatedAt: new Date(order.updatedAt).toISOString(),
+    expiresAt: new Date(order.expiresAt).toISOString(),
+    recipient: order.recipient,
+    amountRaw: order.amountRaw.toString(),
+    amountUsdt: formatUnits(order.amountRaw, USDT_DECIMALS),
+    paymentAmountNim: formatUnits(order.paymentAmountLuna, 5),
+    paymentTxHash: order.paymentTxHash || null,
+    relayTxHash: order.relayTxHash || null,
+    relayBlockNumber: order.relayBlockNumber ?? null,
+    refundTxHash: order.refundTxHash || null,
     lastError: order.lastError || null,
   }
 }

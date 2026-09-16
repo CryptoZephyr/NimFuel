@@ -23,6 +23,26 @@ const minUsdtAmountText = process.env.NIMFUEL_MIN_USDT_AMOUNT?.trim() || '0.0000
 const maxUsdtAmountText = process.env.NIMFUEL_MAX_USDT_AMOUNT?.trim() || null
 const liveProofAmountText = process.env.NIMFUEL_LIVE_PROOF_AMOUNT_USDT?.trim() || null
 const adminApiToken = process.env.ADMIN_API_TOKEN?.trim() || null
+const priceFallbackApiUrl = process.env.PRICE_FALLBACK_API_URL?.trim() || null
+const priceFallbackApiKey = process.env.PRICE_FALLBACK_API_KEY?.trim() || null
+const priceMaxDeviationBpsRaw = process.env.PRICE_MAX_DEVIATION_BPS?.trim() || '1500'
+const priceMaxAgeSecondsRaw = process.env.PRICE_MAX_AGE_SECONDS?.trim() || '120'
+const alertMinRelayerPolText = process.env.NIMFUEL_ALERT_MIN_RELAYER_POL?.trim() || '0.1'
+const alertMinNimText = process.env.NIMFUEL_ALERT_MIN_NIM?.trim() || '10'
+const alertWebhookUrl = process.env.NIMFUEL_ALERT_WEBHOOK_URL?.trim() || null
+const alertCooldownSecondsRaw = process.env.NIMFUEL_ALERT_COOLDOWN_SECONDS?.trim() || '900'
+const monitorIntervalSecondsRaw = process.env.NIMFUEL_MONITOR_INTERVAL_SECONDS?.trim() || '60'
+const healthCacheSecondsRaw = process.env.NIMFUEL_HEALTH_CACHE_SECONDS?.trim() || '15'
+const recoveryScanIntervalSecondsRaw = process.env.NIMFUEL_RECOVERY_SCAN_INTERVAL_SECONDS?.trim() || '30'
+const relayReceiptTimeoutSecondsRaw = process.env.NIMFUEL_RELAY_RECEIPT_TIMEOUT_SECONDS?.trim() || '30'
+const autoRefundAfterSecondsRaw = process.env.NIMFUEL_AUTO_REFUND_AFTER_SECONDS?.trim() || null
+const rateLimitWindowSecondsRaw = process.env.NIMFUEL_RATE_LIMIT_WINDOW_SECONDS?.trim() || '60'
+const rateLimitRequestsRaw = process.env.NIMFUEL_RATE_LIMIT_REQUESTS_PER_WINDOW?.trim() || '120'
+const rateLimitPrepareRaw = process.env.NIMFUEL_RATE_LIMIT_PREPARE_PER_WINDOW?.trim() || '30'
+const rateLimitOrderRaw = process.env.NIMFUEL_RATE_LIMIT_ORDER_PER_WINDOW?.trim() || '10'
+const rateLimitRelayRaw = process.env.NIMFUEL_RATE_LIMIT_RELAY_PER_WINDOW?.trim() || '20'
+const historyLimitRaw = process.env.NIMFUEL_HISTORY_LIMIT?.trim() || '20'
+const allowedOriginsRaw = process.env.NIMFUEL_ALLOWED_ORIGINS?.trim() || '*'
 const relayMaxAttempts = Number(relayMaxAttemptsRaw)
 
 function parseUsdtAmountConfig(value: string, label: string) {
@@ -35,6 +55,34 @@ function parseUsdtAmountConfig(value: string, label: string) {
   if (amount <= 0n) throw new Error(`${label} must be greater than zero.`)
   if (amount > USDT_UINT256_MAX) throw new Error(`${label} must fit inside the USDT token amount range.`)
   return amount
+}
+
+function parseDecimalAmountConfig(value: string, decimals: number, label: string, allowZero = false) {
+  if (!/^\d+(?:\.\d+)?$/.test(value)) {
+    throw new Error(`${label} must be a non-negative decimal amount with at most ${decimals} decimal places.`)
+  }
+  const [whole, fraction = ''] = value.split('.')
+  if (fraction.length > decimals) {
+    throw new Error(`${label} must have at most ${decimals} decimal places.`)
+  }
+  const amount = BigInt(whole) * 10n ** BigInt(decimals)
+    + BigInt(fraction.padEnd(decimals, '0') || '0')
+  if (!allowZero && amount <= 0n) throw new Error(`${label} must be greater than zero.`)
+  return amount
+}
+
+function parsePositiveInteger(value: string, label: string) {
+  if (!/^\d+$/.test(value) || !Number.isSafeInteger(Number(value)) || Number(value) < 1) {
+    throw new Error(`${label} must be a positive integer.`)
+  }
+  return Number(value)
+}
+
+function parseNonNegativeInteger(value: string, label: string) {
+  if (!/^\d+$/.test(value) || !Number.isSafeInteger(Number(value))) {
+    throw new Error(`${label} must be a non-negative integer.`)
+  }
+  return Number(value)
 }
 const nimPaymentAmountLuna = nimPaymentAmountLunaRaw && /^\d+$/.test(nimPaymentAmountLunaRaw) && BigInt(nimPaymentAmountLunaRaw) > 0n
   ? BigInt(nimPaymentAmountLunaRaw)
@@ -53,6 +101,31 @@ const fixedServiceFeeLuna = /^\d+$/.test(fixedServiceFeeLunaRaw) && BigInt(fixed
 const minUsdtAmountRaw = parseUsdtAmountConfig(minUsdtAmountText, 'NIMFUEL_MIN_USDT_AMOUNT')
 const maxUsdtAmountRaw = maxUsdtAmountText === null ? null : parseUsdtAmountConfig(maxUsdtAmountText, 'NIMFUEL_MAX_USDT_AMOUNT')
 const liveProofAmountRaw = liveProofAmountText === null ? null : parseUsdtAmountConfig(liveProofAmountText, 'NIMFUEL_LIVE_PROOF_AMOUNT_USDT')
+const priceMaxDeviationBps = parseNonNegativeInteger(priceMaxDeviationBpsRaw, 'PRICE_MAX_DEVIATION_BPS')
+const priceMaxAgeSeconds = parsePositiveInteger(priceMaxAgeSecondsRaw, 'PRICE_MAX_AGE_SECONDS')
+const alertMinRelayerPolRaw = parseDecimalAmountConfig(alertMinRelayerPolText, 18, 'NIMFUEL_ALERT_MIN_RELAYER_POL', true)
+const alertMinNimLuna = parseDecimalAmountConfig(alertMinNimText, 5, 'NIMFUEL_ALERT_MIN_NIM', true)
+const alertCooldownSeconds = parsePositiveInteger(alertCooldownSecondsRaw, 'NIMFUEL_ALERT_COOLDOWN_SECONDS')
+const monitorIntervalSeconds = parsePositiveInteger(monitorIntervalSecondsRaw, 'NIMFUEL_MONITOR_INTERVAL_SECONDS')
+const healthCacheSeconds = parsePositiveInteger(healthCacheSecondsRaw, 'NIMFUEL_HEALTH_CACHE_SECONDS')
+const recoveryScanIntervalSeconds = parsePositiveInteger(recoveryScanIntervalSecondsRaw, 'NIMFUEL_RECOVERY_SCAN_INTERVAL_SECONDS')
+const relayReceiptTimeoutSeconds = parsePositiveInteger(relayReceiptTimeoutSecondsRaw, 'NIMFUEL_RELAY_RECEIPT_TIMEOUT_SECONDS')
+const autoRefundAfterSeconds = autoRefundAfterSecondsRaw === null
+  ? null
+  : parsePositiveInteger(autoRefundAfterSecondsRaw, 'NIMFUEL_AUTO_REFUND_AFTER_SECONDS')
+const rateLimitWindowSeconds = parsePositiveInteger(rateLimitWindowSecondsRaw, 'NIMFUEL_RATE_LIMIT_WINDOW_SECONDS')
+const rateLimitRequestsPerWindow = parsePositiveInteger(rateLimitRequestsRaw, 'NIMFUEL_RATE_LIMIT_REQUESTS_PER_WINDOW')
+const rateLimitPreparePerWindow = parsePositiveInteger(rateLimitPrepareRaw, 'NIMFUEL_RATE_LIMIT_PREPARE_PER_WINDOW')
+const rateLimitOrderPerWindow = parsePositiveInteger(rateLimitOrderRaw, 'NIMFUEL_RATE_LIMIT_ORDER_PER_WINDOW')
+const rateLimitRelayPerWindow = parsePositiveInteger(rateLimitRelayRaw, 'NIMFUEL_RATE_LIMIT_RELAY_PER_WINDOW')
+const historyLimit = parsePositiveInteger(historyLimitRaw, 'NIMFUEL_HISTORY_LIMIT')
+const allowedOrigins = allowedOriginsRaw === '*'
+  ? ['*']
+  : allowedOriginsRaw.split(',').map(origin => origin.trim()).filter(Boolean)
+
+if (allowedOrigins.length === 0) throw new Error('NIMFUEL_ALLOWED_ORIGINS must contain at least one origin or *.')
+
+if (priceMaxDeviationBps > 10_000) throw new Error('PRICE_MAX_DEVIATION_BPS must be between 0 and 10000.')
 
 if (!polygonRpcUrl) {
   throw new Error('POLYGON_RPC_URL is required.')
@@ -112,9 +185,15 @@ export const config = {
   nimVerificationEndpoint: process.env.NIMIQ_RPC_OR_VERIFICATION_ENDPOINT?.trim() || null,
   nimVerificationApiKeyConfigured: Boolean(process.env.NIMIQ_VERIFICATION_API_KEY?.trim()),
   priceApiUrl: process.env.PRICE_API_URL?.trim() || null,
+  priceApiKey: process.env.PRICE_API_KEY?.trim() || null,
+  priceFallbackApiUrl,
+  priceFallbackApiKey,
   priceApiKeyConfigured: Boolean(process.env.PRICE_API_KEY?.trim()),
+  priceFallbackApiKeyConfigured: Boolean(priceFallbackApiKey),
   priceNimTickerId: process.env.PRICE_NIM_TICKER_ID?.trim() || 'nim-nimiq',
   pricePolTickerId: process.env.PRICE_POL_TICKER_ID?.trim() || 'matic-polygon',
+  priceMaxDeviationBps,
+  priceMaxAgeSeconds,
   quoteTtlSeconds,
   serviceFeeBps,
   minPaymentLuna,
@@ -129,6 +208,22 @@ export const config = {
   liveBroadcastTtlSeconds: liveBroadcastTtlRaw === null ? null : Number(liveBroadcastTtlRaw),
   relayMaxAttempts,
   relayReservationGraceSeconds: Number(relayReservationGraceRaw),
+  recoveryScanIntervalSeconds,
+  relayReceiptTimeoutSeconds,
+  autoRefundAfterSeconds,
+  alertMinRelayerPolRaw,
+  alertMinNimLuna,
+  alertWebhookUrl,
+  alertCooldownSeconds,
+  monitorIntervalSeconds,
+  healthCacheSeconds,
+  rateLimitWindowSeconds,
+  rateLimitRequestsPerWindow,
+  rateLimitPreparePerWindow,
+  rateLimitOrderPerWindow,
+  rateLimitRelayPerWindow,
+  historyLimit,
+  allowedOrigins,
 } as const
 
 let liveBroadcastExpiresAt: number | null = null

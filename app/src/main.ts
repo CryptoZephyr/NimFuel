@@ -65,6 +65,7 @@ type NimQuote = {
   relayCostUsd: string
   serviceCostUsd: string
   priceRetrievedAt: { nim: string; pol: string }
+  priceDegraded?: boolean
 }
 
 type AmountPolicy = {
@@ -87,6 +88,7 @@ type NimOrder = {
   state: string
   createdAt: string
   expiresAt: string
+  updatedAt: string
   paymentTxHash: string | null
   paymentBlockNumber: number | null
   paymentConfirmations: number | null
@@ -146,6 +148,37 @@ type RelayResponse = {
   order?: NimOrder
 }
 
+type OrderHistoryItem = {
+  orderId: string
+  reference: string
+  state: string
+  createdAt: string
+  updatedAt: string
+  expiresAt: string
+  recipient: string
+  amountRaw: string
+  amountUsdt: string
+  paymentAmountNim: string
+  paymentTxHash: string | null
+  relayTxHash: string | null
+  relayBlockNumber: number | null
+  refundTxHash: string | null
+  lastError: string | null
+}
+
+type OrderHistoryResponse = {
+  orders: OrderHistoryItem[]
+  limit: number
+}
+
+type HealthResponse = {
+  ok: boolean
+  ready: boolean
+  status: 'pass' | 'degraded' | 'fail'
+  checkedAt: string
+  checks: Record<string, { status: 'pass' | 'degraded' | 'fail'; detail: string }>
+}
+
 const appRoot = document.querySelector<HTMLDivElement>('#app')
 if (!appRoot) throw new Error('App root was not found.')
 
@@ -176,6 +209,11 @@ let noticeTone: NoticeTone = 'neutral'
 let targetFeedback = ''
 let paymentFeedback = ''
 let relayFeedback = ''
+let historyOrders: OrderHistoryItem[] = []
+let historyState: 'idle' | 'loading' | 'ready' | 'error' = 'idle'
+let historyFeedback = ''
+let historyRequestId = 0
+let serverStatus: 'unknown' | 'checking' | 'pass' | 'degraded' | 'fail' = 'unknown'
 
 function resolveApiBaseUrl(value: unknown) {
   if (typeof value !== 'string' || !value.trim()) return ''
@@ -287,6 +325,39 @@ async function loadAmountPolicy() {
   if (!response.amountPolicy) throw new Error('The server did not return a USDT amount policy.')
   amountPolicy = response.amountPolicy
   return amountPolicy
+}
+
+async function loadServiceHealth() {
+  serverStatus = 'checking'
+  try {
+    const response = await apiRequest<HealthResponse>('/health')
+    serverStatus = response.status
+    return response
+  } catch (error) {
+    serverStatus = 'fail'
+    throw error
+  }
+}
+
+async function loadOrderHistory() {
+  if (!evmAddress) return
+  const address = evmAddress
+  const requestId = ++historyRequestId
+  historyState = 'loading'
+  historyFeedback = ''
+  render()
+  try {
+    const response = await apiRequest<OrderHistoryResponse>(`/v1/orders?evmAddress=${encodeURIComponent(address)}&limit=10`)
+    if (requestId !== historyRequestId || evmAddress !== address) return
+    historyOrders = Array.isArray(response.orders) ? response.orders : []
+    historyState = 'ready'
+  } catch (error) {
+    if (requestId !== historyRequestId || evmAddress !== address) return
+    historyOrders = []
+    historyState = 'error'
+    historyFeedback = friendlyError(error, 'Order history could not be loaded.')
+  }
+  render()
 }
 
 function encodeAddressArgument(address: string) {
@@ -414,6 +485,7 @@ async function restoreSavedOrder() {
     flowState = flowStateForOrder(order)
     setNotice('Your previous order was restored. Continue it here.', isTerminalOrderState(order.state) ? 'success' : 'neutral')
     render()
+    void loadOrderHistory()
   } catch {
     rememberOrder(null)
   }
@@ -471,10 +543,19 @@ function setRelayStatus(message: string, isError = false) {
 }
 
 function renderWalletPanel() {
-  const apiReady = Boolean(config.apiBaseUrl)
+  const apiReady = Boolean(config.apiBaseUrl) && serverStatus !== 'fail'
+  const apiLabel = serverStatus === 'checking'
+    ? 'Checking API'
+    : serverStatus === 'pass'
+      ? 'API ready'
+      : serverStatus === 'degraded'
+        ? 'API degraded'
+        : serverStatus === 'fail'
+          ? 'API unavailable'
+          : apiReady ? 'API configured' : 'API missing'
   return `
     <section class="panel wallet-panel">
-      <div class="section-heading"><div><p class="eyebrow">WALLET CHECK</p><h2>See what your wallet can do</h2></div><span class="badge ${apiReady ? 'badge-good' : 'badge-warn'}">${apiReady ? 'API ready' : 'API missing'}</span></div>
+      <div class="section-heading"><div><p class="eyebrow">WALLET CHECK</p><h2>See what your wallet can do</h2></div><span class="badge ${serverStatus === 'pass' ? 'badge-good' : serverStatus === 'fail' ? 'badge-warn' : ''}">${apiLabel}</span></div>
       <p class="form-help">NimFuel reads your Nimiq Pay account, Polygon network, USDT balance, and POL balance before asking you to approve anything.</p>
       <div class="results" id="results">${results.map(renderResult).join('')}</div>
       <button id="run-checks" class="primary-button" type="button" ${flowState === 'connecting' ? 'disabled' : ''}>${flowState === 'connecting' ? 'Checking wallet...' : 'Run wallet check'}</button>
@@ -513,11 +594,11 @@ function renderQuotePanel() {
   const expired = quoteExpired(nimQuote)
   return `
     <section class="panel quote-panel">
-      <div class="section-heading"><div><p class="eyebrow">QUOTE READY</p><h2>Review the NIM cost</h2></div><span class="badge ${expired ? 'badge-warn' : 'badge-good'}">${expired ? 'Expired' : 'Live quote'}</span></div>
+      <div class="section-heading"><div><p class="eyebrow">QUOTE READY</p><h2>Review the NIM cost</h2></div><span class="badge ${expired ? 'badge-warn' : 'badge-good'}">${expired ? 'Expired' : nimQuote.priceDegraded ? 'Protected quote' : 'Live quote'}</span></div>
       <div class="quote-hero"><span>You pay</span><strong>${escapeHtml(nimQuote.paymentAmountNim)} NIM</strong><small>Quote expires ${escapeHtml(new Date(nimQuote.expiresAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }))}</small></div>
       <div class="summary-list"><div><span>USDT action</span><strong>${escapeHtml(formatUnits(BigInt(nimQuote.amountRaw), USDT_DECIMALS))} USDT</strong></div><div><span>Estimated Polygon gas</span><strong>${escapeHtml(nimQuote.estimatedFeePol)} POL</strong></div><div><span>Gas and service value</span><strong>$${escapeHtml(nimQuote.serviceCostUsd)} USD</strong></div><div><span>Payment reference</span><strong>Created after you continue</strong></div></div>
       <button id="create-nim-order" class="primary-button" type="button" ${expired ? 'disabled' : ''}>Continue with NIM</button>
-      <p class="status-line">The quote is bound to the authorization you just approved. No Polygon transaction has been sent.</p>
+      <p class="status-line">${nimQuote.priceDegraded ? 'One market source was unavailable. This quote used a bounded fallback or recent safe price.' : 'The quote used the configured live market sources.'} The authorization is bound to this quote, and no Polygon transaction has been sent.</p>
     </section>
   `
 }
@@ -581,6 +662,53 @@ function renderRecoveryPanel() {
   `
 }
 
+function historyTime(value: string) {
+  const timestamp = Date.parse(value)
+  return Number.isFinite(timestamp)
+    ? new Date(timestamp).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' })
+    : 'Unknown time'
+}
+
+function renderHistoryPanel() {
+  if (!evmAddress) return ''
+  if (historyState === 'loading') {
+    return '<section class="panel history-panel"><div class="section-heading"><div><p class="eyebrow">ORDER HISTORY</p><h2>Loading your recent actions</h2></div></div><p class="form-help">NimFuel is syncing the durable order record.</p></section>'
+  }
+  if (historyState === 'error') {
+    return '<section class="panel history-panel"><div class="section-heading"><div><p class="eyebrow">ORDER HISTORY</p><h2>Your history could not be loaded</h2></div><span class="badge badge-warn">Needs retry</span></div><p class="form-help">' + escapeHtml(historyFeedback || 'The server did not return the order history.') + '</p><button id="retry-history" class="secondary-button" type="button">Retry order history</button></section>'
+  }
+  if (historyOrders.length === 0) {
+    return '<section class="panel history-panel"><div class="section-heading"><div><p class="eyebrow">ORDER HISTORY</p><h2>Your NimFuel history</h2></div><span class="badge">Empty</span></div><p class="form-help">Completed and in-progress actions will appear here after your first order.</p></section>'
+  }
+  const items = historyOrders.map(order => (
+    '<button class="history-item" type="button" data-history-order="' + escapeHtml(order.orderId) + '">' +
+      '<span><strong>' + escapeHtml(order.amountUsdt) + ' USDT</strong><small>' + escapeHtml(historyTime(order.updatedAt)) + '</small></span>' +
+      '<span><strong>' + escapeHtml(stateLabel(order.state)) + '</strong><small>' + escapeHtml(shorten(order.orderId, 8, 6)) + '</small></span>' +
+    '</button>'
+  )).join('')
+  return '<section class="panel history-panel"><div class="section-heading"><div><p class="eyebrow">ORDER HISTORY</p><h2>Return to a previous action</h2></div><span class="badge badge-good">' + historyOrders.length + ' saved</span></div><p class="form-help">These records come from NimFuel&apos;s durable order store. Open one to review its current state and proof.</p><div class="history-list">' + items + '</div></section>'
+}
+
+function refreshHistory() {
+  if (evmAddress) void loadOrderHistory()
+}
+
+async function openHistoricalOrder(orderId: string) {
+  try {
+    nimOrder = await apiRequest<NimOrder>('/v1/orders/' + encodeURIComponent(orderId))
+    nimAddress = nimOrder.nimAddress
+    evmAddress = nimOrder.evmAddress
+    relayRecipientDraft = nimOrder.recipient
+    relayAmountDraft = formatUnits(BigInt(nimOrder.amountRaw), USDT_DECIMALS)
+    flowState = flowStateForOrder(nimOrder)
+    setNotice('Previous order restored. Review its current state below.', isTerminalOrderState(nimOrder.state) ? 'success' : 'neutral')
+    render()
+  } catch (error) {
+    setNotice(friendlyError(error, 'That order could not be loaded.'), 'error')
+    render()
+  }
+}
+
 function render() {
   if (nimOrder) rememberOrder(nimOrder)
   root.innerHTML = `
@@ -603,6 +731,7 @@ function render() {
       ${renderRelayPanel()}
       ${renderSuccessPanel()}
       ${renderRecoveryPanel()}
+      ${renderHistoryPanel()}
       <footer><span>Polygon chain ${escapeHtml(config.chainId || 'not configured')}</span><span>Payment is verified before fulfillment</span></footer>
     </div>
   `
@@ -613,6 +742,16 @@ function render() {
   document.querySelector<HTMLButtonElement>('#verify-nim-payment')?.addEventListener('click', verifyNimPayment)
   document.querySelector<HTMLButtonElement>('#relay-paid-order')?.addEventListener('click', relayPaidOrder)
   document.querySelector<HTMLButtonElement>('#start-new-action')?.addEventListener('click', clearCurrentOrder)
+  document.querySelector<HTMLButtonElement>('#retry-history')?.addEventListener('click', () => { void loadOrderHistory() })
+  document.querySelectorAll<HTMLButtonElement>('[data-history-order]').forEach(button => {
+    button.addEventListener('click', () => {
+      const orderId = button.dataset.historyOrder
+      if (!orderId) return
+      setNotice('Loading the selected order.')
+      render()
+      void openHistoricalOrder(orderId)
+    })
+  })
 }
 
 render()
@@ -647,10 +786,20 @@ async function runChecks() {
   targetFeedback = ''
   paymentFeedback = ''
   relayFeedback = ''
+  historyOrders = []
+  historyState = 'idle'
+  historyFeedback = ''
+  historyRequestId += 1
+  serverStatus = 'checking'
   results = initialResults().map(result => ({ ...result, state: 'pending' as ResultState }))
   flowState = 'connecting'
   setNotice('Checking your wallet and network.')
   render()
+  void loadServiceHealth().then(() => {
+    if (!['authorizing', 'preflighting', 'awaiting_nim_payment', 'payment_detected', 'relaying', 'confirming'].includes(flowState)) render()
+  }).catch(() => {
+    if (!['authorizing', 'preflighting', 'awaiting_nim_payment', 'payment_detected', 'relaying', 'confirming'].includes(flowState)) render()
+  })
 
   try {
     if (!nimiqPromise) throw new Error('Nimiq Pay initialization did not start.')
@@ -715,6 +864,7 @@ async function runChecks() {
       setNotice('Polygon is ready, but Nimiq Pay account access is still needed.', 'error')
     }
     render()
+    void loadOrderHistory()
   } catch (error) {
     const failedIndex = failedStage === 'EVM wallet' ? 3 : failedStage === 'Polygon network' ? 4 : failedStage === 'POL balance' ? 5 : failedStage === 'USDT balance' ? 6 : 7
     results[failedIndex] = { label: failedStage, value: 'unavailable', state: 'fail', detail: providerErrorCode(error) === '4902' ? 'Polygon is not configured in Nimiq Pay.' : friendlyError(error, 'The wallet read failed.') }
@@ -808,6 +958,7 @@ async function createNimPaymentOrder() {
     paymentFeedback = `Pay exactly ${nimOrder.paymentAmountNim} NIM with the reference shown below.`
     setNotice('Your order is ready. Pay the exact NIM amount shown below.', 'success')
     render()
+    refreshHistory()
   } catch (error) {
     flowState = 'error'
     setNotice(friendlyError(error, 'The NIM payment order could not be created.'), 'error')
@@ -875,6 +1026,7 @@ async function verifyNimPayment() {
     paymentFeedback = `NIM payment confirmed in block ${response.paymentBlockNumber ?? 'unknown'}.`
     setNotice('Your NIM payment is confirmed. The paid Polygon action is ready.', 'success')
     render()
+    refreshHistory()
   } catch (error) {
     try { await refreshOrder() } catch { /* Keep the submitted hash visible while the API recovers. */ }
     const message = friendlyError(error, 'NIM payment verification failed.')
@@ -909,6 +1061,7 @@ async function relayPaidOrder() {
       setNotice('The Polygon transaction was submitted. Check again after inclusion.')
       relayFeedback = response.txHash ? `Polygon transaction submitted: ${response.txHash}` : 'Polygon transaction submitted. Check again after inclusion.'
       render()
+      refreshHistory()
       return
     }
     if (!response.txHash || response.receiptStatus !== 'success' || response.verifiedStateChange !== true || nimOrder?.state !== 'FULFILLED') throw new Error('The Polygon receipt was not verified as the intended USDT action.')
@@ -916,6 +1069,7 @@ async function relayPaidOrder() {
     relayFeedback = `Polygon transaction verified: ${response.txHash}`
     setNotice('Your USDT action succeeded.', 'success')
     render()
+    refreshHistory()
   } catch (error) {
     try { await refreshOrder() } catch { /* Keep the current order state if the status read is temporarily unavailable. */ }
     const message = friendlyError(error, 'Polygon fulfillment failed.')

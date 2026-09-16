@@ -49,6 +49,12 @@ For persistent live relay mode, set `NIMFUEL_ENABLE_LIVE_BROADCAST=true` and lea
 
 Refund sending remains an operator-controlled NIM transfer. The service records the instruction and only marks it refunded after the configured Nimiq verification endpoint confirms the recipient, amount, reference, sender when configured, and confirmation state.
 
+## Stage 2 operations
+
+Configure the optional Stage 2 variables from [RUNBOOK.md](RUNBOOK.md) in the provider's secret environment. At minimum, set a real `NIMFUEL_ALLOWED_ORIGINS` value for the hosted frontend and review the relayer POL and NIM alert thresholds. Add `PRICE_FALLBACK_API_URL` when a second price source is available. Keep `NIMFUEL_AUTO_REFUND_AFTER_SECONDS` empty until the operator has a documented refund process.
+
+The API now exposes `GET /health`, protected `GET /v1/admin/health`, protected `GET /v1/admin/metrics`, and public address-scoped order history at `GET /v1/orders?evmAddress=...`. The public health response is a readiness signal, not proof that a live wallet transaction succeeded.
+
 ## Render backend
 
 The backend is deployed as a native Node service on Render.
@@ -65,4 +71,4 @@ The backend is deployed as a native Node service on Render.
 - Storage: Neon PostgreSQL
 - Live broadcast: enabled persistently for the current controlled deployment
 
-Secrets are configured in Render's environment and are not committed. The current deployment leaves `NIMFUEL_LIVE_BROADCAST_TTL_SECONDS` and `NIMFUEL_LIVE_PROOF_AMOUNT_USDT` empty, so live relay remains enabled until the operator explicitly disables it or adds a proof restriction. The public app points `PUBLIC_API_BASE_URL` at the backend URL above.
+Secrets are configured in Render's environment and are not committed. After each code push, confirm that Render has redeployed the new commit before using the hosted app as evidence. Verify the live broadcast flag, amount policy, dependency checks, and current deployment status from the hosted `/health` response. The public app points `PUBLIC_API_BASE_URL` at the backend URL above.

@@ -9,6 +9,23 @@ export type MarketPrice = {
   usd: string
   usdNanos: bigint
   retrievedAt: string
+  provider: string
+  fromCache: boolean
+}
+
+export type PriceProviderStatus = {
+  provider: string
+  tickerId: string
+  status: 'pass' | 'fail'
+  retrievedAt?: string
+  error?: string
+}
+
+export type MarketPrices = {
+  nim: MarketPrice
+  pol: MarketPrice
+  providers: PriceProviderStatus[]
+  degraded: boolean
 }
 
 export type NimQuoteCalculation = {
@@ -17,6 +34,21 @@ export type NimQuoteCalculation = {
   relayCostLuna: bigint
   serviceFeeLuna: bigint
   paymentAmountLuna: bigint
+}
+
+type PriceSource = {
+  name: 'primary' | 'fallback'
+  url: string
+  apiKey: string | null
+}
+
+const priceCache = new Map<string, MarketPrice>()
+
+function configuredSources() {
+  const sources: PriceSource[] = []
+  if (config.priceApiUrl) sources.push({ name: 'primary', url: config.priceApiUrl, apiKey: config.priceApiKey })
+  if (config.priceFallbackApiUrl) sources.push({ name: 'fallback', url: config.priceFallbackApiUrl, apiKey: config.priceFallbackApiKey })
+  return sources
 }
 
 function ceilDiv(numerator: bigint, denominator: bigint) {
@@ -36,20 +68,40 @@ function parseUsdNanos(value: unknown) {
   }
 
   const [whole, fraction = ''] = text.split('.')
-  const roundedFraction = `${fraction}000000000`.slice(0, 10)
-  const nanos = BigInt(`${fraction.slice(0, 9)}000000000`.slice(0, 9))
-  const rounded = roundedFraction[9] && Number(roundedFraction[9]) >= 5 ? nanos + 1n : nanos
+  const nanosText = `${fraction}000000000`
+  const nanos = BigInt(nanosText.slice(0, 9))
+  const rounded = nanosText[9] && Number(nanosText[9]) >= 5 ? nanos + 1n : nanos
   const result = BigInt(whole) * USD_NANOS_PER_USD + rounded
   if (result <= 0n) throw new Error('Price API returned a non-positive USD price.')
   return result
 }
 
-async function fetchMarketPrice(tickerId: string) {
-  if (!config.priceApiUrl) throw new Error('PRICE_API_URL is required for live NIM quotes.')
+export function parseMarketPricePayload(payload: unknown, tickerId: string, provider: string, retrievedAt = new Date().toISOString()): MarketPrice {
+  const record = typeof payload === 'object' && payload !== null ? payload as Record<string, unknown> : null
+  const quotes = typeof record?.quotes === 'object' && record.quotes !== null
+    ? record.quotes as Record<string, unknown>
+    : null
+  const usd = typeof quotes?.USD === 'object' && quotes.USD !== null
+    ? quotes.USD as Record<string, unknown>
+    : null
+  const price = usd?.price
+  const usdNanos = parseUsdNanos(price)
 
-  const endpoint = `${config.priceApiUrl.replace(/\/$/, '')}/tickers/${encodeURIComponent(tickerId)}?quotes=USD`
+  return {
+    tickerId,
+    symbol: typeof record?.symbol === 'string' ? record.symbol : tickerId,
+    usd: typeof price === 'number' || typeof price === 'string' ? String(price) : usdNanos.toString(),
+    usdNanos,
+    retrievedAt,
+    provider,
+    fromCache: false,
+  }
+}
+
+async function fetchMarketPrice(source: PriceSource, tickerId: string) {
+  const endpoint = `${source.url.replace(/\/$/, '')}/tickers/${encodeURIComponent(tickerId)}?quotes=USD`
   const headers: Record<string, string> = { Accept: 'application/json' }
-  if (process.env.PRICE_API_KEY?.trim()) headers['X-API-Key'] = process.env.PRICE_API_KEY.trim()
+  if (source.apiKey) headers['X-API-Key'] = source.apiKey
 
   let response: Response
   try {
@@ -67,31 +119,91 @@ async function fetchMarketPrice(tickerId: string) {
     throw new Error(`Price API returned invalid JSON for ${tickerId}.`)
   }
 
-  const record = typeof payload === 'object' && payload !== null ? payload as Record<string, unknown> : null
-  const quotes = typeof record?.quotes === 'object' && record.quotes !== null
-    ? record.quotes as Record<string, unknown>
-    : null
-  const usd = typeof quotes?.USD === 'object' && quotes.USD !== null
-    ? quotes.USD as Record<string, unknown>
-    : null
-  const price = usd?.price
-  const usdNanos = parseUsdNanos(price)
-
-  return {
-    tickerId,
-    symbol: typeof record?.symbol === 'string' ? record.symbol : tickerId,
-    usd: typeof price === 'number' || typeof price === 'string' ? String(price) : usdNanos.toString(),
-    usdNanos,
-    retrievedAt: new Date().toISOString(),
-  } satisfies MarketPrice
+  return parseMarketPricePayload(payload, tickerId, source.name)
 }
 
-export async function readMarketPrices() {
+function priceDeviationBps(first: bigint, second: bigint) {
+  const larger = first > second ? first : second
+  const smaller = first > second ? second : first
+  if (larger === 0n) return 0
+  return Number(((larger - smaller) * 10_000n) / larger)
+}
+
+function ageSeconds(retrievedAt: string) {
+  return Math.max(0, Math.floor((Date.now() - Date.parse(retrievedAt)) / 1000))
+}
+
+async function readTickerPrice(tickerId: string) {
+  const sources = configuredSources()
+  if (sources.length === 0) throw new Error('PRICE_API_URL is required for live NIM quotes.')
+
+  const settled = await Promise.all(sources.map(async source => {
+    try {
+      return { source, price: await fetchMarketPrice(source, tickerId), error: null }
+    } catch (error) {
+      return { source, price: null, error: error instanceof Error ? error.message : 'Price source failed.' }
+    }
+  }))
+  const successes = settled.filter((entry): entry is { source: PriceSource; price: MarketPrice; error: null } => entry.price !== null)
+
+  if (successes.length === 0) {
+    const cached = priceCache.get(tickerId)
+    if (cached && ageSeconds(cached.retrievedAt) <= config.priceMaxAgeSeconds) {
+      return {
+        price: { ...cached, provider: `cache:${cached.provider}`, fromCache: true },
+        statuses: settled.map(entry => ({
+          provider: entry.source.name,
+          tickerId,
+          status: 'fail' as const,
+          error: entry.error || 'Price source failed.',
+        })),
+        degraded: true,
+      }
+    }
+    throw new Error(`No configured price source returned a usable ${tickerId} price.`)
+  }
+
+  if (successes.length > 1) {
+    const primary = successes.find(entry => entry.source.name === 'primary')?.price || successes[0].price
+    const disagreement = successes.some(entry => priceDeviationBps(primary.usdNanos, entry.price.usdNanos) > config.priceMaxDeviationBps)
+    if (disagreement) {
+      throw new Error(`Configured price sources disagree beyond the ${config.priceMaxDeviationBps} bps safety threshold for ${tickerId}.`)
+    }
+  }
+
+  const selected = tickerId === config.pricePolTickerId
+    ? successes.reduce((current, entry) => entry.price.usdNanos > current.usdNanos ? entry.price : current, successes[0].price)
+    : successes.reduce((current, entry) => entry.price.usdNanos < current.usdNanos ? entry.price : current, successes[0].price)
+  const provider = successes.length > 1
+    ? `conservative:${successes.map(entry => entry.source.name).join(',')}`
+    : successes[0].source.name
+  const price = { ...selected, provider, fromCache: false }
+  priceCache.set(tickerId, price)
+
+  return {
+    price,
+    statuses: settled.map(entry => entry.price
+      ? { provider: entry.source.name, tickerId, status: 'pass' as const, retrievedAt: entry.price.retrievedAt }
+      : { provider: entry.source.name, tickerId, status: 'fail' as const, error: entry.error || 'Price source failed.' }),
+    degraded: successes.length < sources.length,
+  }
+}
+
+export async function readMarketPrices(): Promise<MarketPrices> {
   const [nim, pol] = await Promise.all([
-    fetchMarketPrice(config.priceNimTickerId),
-    fetchMarketPrice(config.pricePolTickerId),
+    readTickerPrice(config.priceNimTickerId),
+    readTickerPrice(config.pricePolTickerId),
   ])
-  return { nim, pol }
+  return {
+    nim: nim.price,
+    pol: pol.price,
+    providers: [...nim.statuses, ...pol.statuses],
+    degraded: nim.degraded || pol.degraded || nim.price.fromCache || pol.price.fromCache,
+  }
+}
+
+export function clearPriceCache() {
+  priceCache.clear()
 }
 
 export function calculateNimQuote(input: {

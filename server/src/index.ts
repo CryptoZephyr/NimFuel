@@ -1,7 +1,7 @@
 import { createPublicClient, createWalletClient, formatUnits, http, parseEventLogs, verifyTypedData, type Hex } from 'viem'
 import { privateKeyToAccount } from 'viem/accounts'
 import { timingSafeEqual } from 'node:crypto'
-import { databaseHealth, initializeDatabase, closeDatabase } from './db.js'
+import { initializeDatabase, closeDatabase } from './db.js'
 import { armLiveBroadcastWindow, config, formatUsdtAmount, isLiveBroadcastEnabled, polygon, POLYGON_CHAIN_ID, POLYGON_USDT_ADDRESS, requireAddress, requireRawAmount, requireUnsignedInteger, USDT_DECIMALS, usdtAmountPolicy, validateUsdtAmount } from './config.js'
 import {
   confirmRefund,
@@ -11,6 +11,9 @@ import {
   getQuoteById,
   getOrderByReference,
   getOrder,
+  getOrdersByEvmAddress,
+  getOperationalMetrics,
+  getOrdersReadyForAutoRefund,
   getOutstandingRelayAttempts,
   getRelayAttemptsByOrderId,
   getRelayAttemptCount,
@@ -18,6 +21,7 @@ import {
   markPaymentExpired,
   markPaymentMismatch,
   publicOrder,
+  publicOrderHistory,
   publicQuote,
   recordRefundFailure,
   recordRelayOutcome,
@@ -31,6 +35,8 @@ import {
 import { encodeNimReference, formatNimAddress, normalizeNimAddress, normalizeNimTransactionHash, parseNimInteger, readNimiqAccount, readNimiqTransaction, requireNimAddress } from './nim.js'
 import { calculateNimQuote, formatUsdNanos, readMarketPrices } from './prices.js'
 import { encodeMetaTransaction, encodeTransfer, metaTransactionDigest, metaTransactionDomain, metaTransactionTypes, tokenAbi } from './relay.js'
+import { systemMonitor } from './monitoring.js'
+import { enforceRateLimit, RateLimitError, requestClientId } from './rate-limit.js'
 
 const publicClient = createPublicClient({ chain: polygon, transport: http(config.polygonRpcUrl) })
 const relayerAccount = config.relayerPrivateKey ? privateKeyToAccount(config.relayerPrivateKey) : null
@@ -38,7 +44,6 @@ const walletClient = relayerAccount
   ? createWalletClient({ account: relayerAccount, chain: polygon, transport: http(config.polygonRpcUrl) })
   : null
 
-const allowedOrigin = '*'
 const inFlightRelays = new Map<string, Promise<unknown>>()
 const recoveryInFlight = new Set<string>()
 
@@ -49,15 +54,35 @@ class HttpError extends Error {
   }
 }
 
-function sendJson(response: import('node:http').ServerResponse, status: number, body: unknown) {
+function sendJson(response: import('node:http').ServerResponse, status: number, body: unknown, origin: string | null = '*', extraHeaders: Record<string, string> = {}) {
   response.writeHead(status, {
     'Content-Type': 'application/json; charset=utf-8',
-    'Access-Control-Allow-Origin': allowedOrigin,
-    'Access-Control-Allow-Headers': 'Content-Type, Authorization',
-    'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
     'Cache-Control': 'no-store',
+    ...(origin ? {
+      'Access-Control-Allow-Origin': origin,
+      'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+      'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+      Vary: 'Origin',
+    } : {}),
+    ...extraHeaders,
   })
   response.end(JSON.stringify(body))
+}
+
+function responseOrigin(request: import('node:http').IncomingMessage) {
+  const origin = request.headers.origin
+  if (!origin || config.allowedOrigins.includes('*')) return '*'
+  return config.allowedOrigins.includes(origin) ? origin : null
+}
+
+function rateLimitFor(pathname: string, method: string) {
+  if (method === 'POST' && pathname === '/v1/preflight') return { scope: 'preflight', limit: config.rateLimitPreparePerWindow }
+  if (method === 'POST' && pathname === '/v1/relay/validate') return { scope: 'relay-validate', limit: config.rateLimitPreparePerWindow }
+  if (method === 'POST' && pathname === '/v1/orders') return { scope: 'order-create', limit: config.rateLimitOrderPerWindow }
+  if (method === 'POST' && pathname === '/v1/relay/execute') return { scope: 'relay-execute', limit: config.rateLimitRelayPerWindow }
+  if (method === 'POST' && pathname.endsWith('/verify-payment')) return { scope: 'payment-verify', limit: config.rateLimitOrderPerWindow }
+  if (pathname.startsWith('/v1/')) return { scope: 'api', limit: config.rateLimitRequestsPerWindow }
+  return { scope: 'general', limit: config.rateLimitRequestsPerWindow }
 }
 
 function errorMessage(error: unknown) {
@@ -294,7 +319,7 @@ async function createPreflight(body: Record<string, unknown>) {
     fixedServiceFeeLuna: config.fixedServiceFeeLuna,
     minPaymentLuna: config.minPaymentLuna,
   })
-  const priceSource = `coinpaprika:${prices.nim.tickerId},coinpaprika:${prices.pol.tickerId}`
+  const priceSource = `nim:${prices.nim.provider},pol:${prices.pol.provider}`
   const quote = await createQuote({
     authorization: {
       authorizationDigest: prepared.authorizationDigest,
@@ -341,6 +366,7 @@ async function createPreflight(body: Record<string, unknown>) {
         nim: prices.nim.retrievedAt,
         pol: prices.pol.retrievedAt,
       },
+      priceDegraded: prices.degraded,
     },
   }
 }
@@ -531,7 +557,7 @@ async function adminLookup(request: import('node:http').IncomingMessage, url: UR
   return await adminOrderSnapshot(order)
 }
 
-const RELAY_RECEIPT_TIMEOUT_MS = 30_000
+const RELAY_RECEIPT_TIMEOUT_MS = config.relayReceiptTimeoutSeconds * 1_000
 
 function requestedAuthorizationDigest(body: Record<string, unknown>) {
   try {
@@ -861,18 +887,50 @@ async function recoverOutstandingRelayAttempts() {
   }
 }
 
+async function autoRequestRefunds() {
+  if (config.autoRefundAfterSeconds === null) return
+  const candidates = await getOrdersReadyForAutoRefund(config.autoRefundAfterSeconds)
+  for (const order of candidates) {
+    try {
+      const updated = await requestRefund(order.id)
+      await systemMonitor.report('refund-pending', 'warning', 'A recovered paid order was moved to the refund queue.', {
+        orderId: updated.id,
+        reference: updated.reference,
+      })
+    } catch (error) {
+      await systemMonitor.report('refund-automation', 'critical', 'Automatic refund queueing failed for a recovered paid order.', {
+        orderId: order.id,
+        reason: errorMessage(error),
+      })
+    }
+  }
+}
+
 const server = (await import('node:http')).createServer(async (request, response) => {
   if (request.method === 'OPTIONS') {
-    sendJson(response, 204, {})
+    sendJson(response, 204, {}, responseOrigin(request))
     return
   }
 
   const url = new URL(request.url || '/', `http://${request.headers.host || 'localhost'}`)
+  const origin = responseOrigin(request)
+  const reply = (status: number, body: unknown, headers: Record<string, string> = {}) => sendJson(response, status, body, origin, headers)
   try {
+    if (origin === null) {
+      reply(403, { error: 'This origin is not allowed to use NimFuel.' })
+      return
+    }
+    const rateLimit = rateLimitFor(url.pathname, request.method || 'GET')
+    enforceRateLimit({
+      clientId: requestClientId(request),
+      scope: rateLimit.scope,
+      limit: rateLimit.limit,
+      windowSeconds: config.rateLimitWindowSeconds,
+    })
     if (request.method === 'GET' && url.pathname === '/health') {
-      await databaseHealth()
-      sendJson(response, 200, {
-        ok: true,
+      const snapshot = await systemMonitor.current()
+      reply(200, {
+        ...systemMonitor.publicSnapshot(snapshot),
         service: 'nimfuel-server',
         chainId: POLYGON_CHAIN_ID,
         tokenAddress: POLYGON_USDT_ADDRESS,
@@ -884,6 +942,8 @@ const server = (await import('node:http')).createServer(async (request, response
         orderStorage: 'postgres',
         priceApiConfigured: Boolean(config.priceApiUrl),
         priceApiKeyConfigured: config.priceApiKeyConfigured,
+        priceFallbackConfigured: Boolean(config.priceFallbackApiUrl),
+        priceFallbackApiKeyConfigured: config.priceFallbackApiKeyConfigured,
         quoteConfigured: Boolean(config.priceApiUrl && config.quoteTtlSeconds),
         adminLookupConfigured: Boolean(config.adminApiToken),
         refundVerificationConfigured: Boolean(config.nimVerificationEndpoint),
@@ -896,32 +956,44 @@ const server = (await import('node:http')).createServer(async (request, response
     }
 
     if (request.method === 'GET' && url.pathname === '/v1/relay/capability') {
-      sendJson(response, 200, await readCapability())
+      reply(200, await readCapability())
       return
     }
 
     if (request.method === 'POST' && url.pathname === '/v1/preflight') {
-      sendJson(response, 200, await createPreflight(await readJson(request)))
+      reply(200, await createPreflight(await readJson(request)))
       return
     }
 
     if (request.method === 'POST' && url.pathname === '/v1/relay/validate') {
-      sendJson(response, 200, await validateRelay(await readJson(request)))
+      reply(200, await validateRelay(await readJson(request)))
       return
     }
 
     if (request.method === 'POST' && url.pathname === '/v1/relay/execute') {
-      sendJson(response, 200, await executeRelay(await readJson(request)))
+      reply(200, await executeRelay(await readJson(request)))
       return
     }
 
     if (request.method === 'POST' && url.pathname === '/v1/orders') {
-      sendJson(response, 201, await createNimOrder(await readJson(request)))
+      reply(201, await createNimOrder(await readJson(request)))
       return
     }
 
     if (request.method === 'GET' && url.pathname === '/v1/admin/orders') {
-      sendJson(response, 200, await adminLookup(request, url))
+      reply(200, await adminLookup(request, url))
+      return
+    }
+
+    if (request.method === 'GET' && url.pathname === '/v1/admin/health') {
+      requireAdmin(request)
+      reply(200, systemMonitor.adminSnapshot(await systemMonitor.current()))
+      return
+    }
+
+    if (request.method === 'GET' && url.pathname === '/v1/admin/metrics') {
+      requireAdmin(request)
+      reply(200, await getOperationalMetrics())
       return
     }
 
@@ -929,7 +1001,7 @@ const server = (await import('node:http')).createServer(async (request, response
     if (request.method === 'POST' && adminRefundVerifyMatch) {
       requireAdmin(request)
       const order = await verifyRefundPayment(decodeURIComponent(adminRefundVerifyMatch[1]), await readJson(request))
-      sendJson(response, 200, await adminOrderSnapshot(order))
+      reply(200, await adminOrderSnapshot(order))
       return
     }
 
@@ -937,7 +1009,7 @@ const server = (await import('node:http')).createServer(async (request, response
     if (request.method === 'POST' && adminRefundMatch) {
       requireAdmin(request)
       const order = await requestRefund(decodeURIComponent(adminRefundMatch[1]))
-      sendJson(response, 200, await adminOrderSnapshot(order))
+      reply(200, await adminOrderSnapshot(order))
       return
     }
 
@@ -945,39 +1017,67 @@ const server = (await import('node:http')).createServer(async (request, response
     if (request.method === 'GET' && adminOrderMatch) {
       requireAdmin(request)
       const order = await orderForId(decodeURIComponent(adminOrderMatch[1]))
-      sendJson(response, 200, await adminOrderSnapshot(order))
+      reply(200, await adminOrderSnapshot(order))
+      return
+    }
+
+    if (request.method === 'GET' && url.pathname === '/v1/orders') {
+      const evmAddress = url.searchParams.get('evmAddress')?.trim()
+      if (!evmAddress) throw new HttpError(400, 'evmAddress is required to load order history.')
+      const address = requireAddress(evmAddress, 'evmAddress')
+      const requestedLimit = Number(url.searchParams.get('limit') || config.historyLimit)
+      const limit = Number.isSafeInteger(requestedLimit)
+        ? Math.min(Math.max(1, requestedLimit), config.historyLimit)
+        : config.historyLimit
+      const orders = await getOrdersByEvmAddress(address, limit)
+      reply(200, { orders: orders.map(publicOrderHistory), limit })
       return
     }
 
     const orderMatch = url.pathname.match(/^\/v1\/orders\/([^/]+)$/)
     if (request.method === 'GET' && orderMatch) {
-      sendJson(response, 200, publicOrder(await orderForId(decodeURIComponent(orderMatch[1]))))
+      reply(200, publicOrder(await orderForId(decodeURIComponent(orderMatch[1]))))
       return
     }
 
     const paymentMatch = url.pathname.match(/^\/v1\/orders\/([^/]+)\/verify-payment$/)
     if (request.method === 'POST' && paymentMatch) {
-      sendJson(response, 200, await verifyNimPayment(decodeURIComponent(paymentMatch[1]), await readJson(request)))
+      reply(200, await verifyNimPayment(decodeURIComponent(paymentMatch[1]), await readJson(request)))
       return
     }
 
-    sendJson(response, 404, { error: 'Not found.' })
+    reply(404, { error: 'Not found.' })
   } catch (error) {
-    sendJson(response, error instanceof HttpError ? error.status : 400, { error: errorMessage(error) })
+    if (error instanceof RateLimitError) {
+      reply(error.status, { error: error.message }, { 'Retry-After': String(error.retryAfterSeconds) })
+      return
+    }
+    reply(error instanceof HttpError ? error.status : 400, { error: errorMessage(error) })
   }
 })
 
 await initializeDatabase()
 
 const recoveryTimer = setInterval(() => {
-  void recoverOutstandingRelayAttempts().catch(error => {
-    console.error(`Relay recovery scan failed: ${errorMessage(error)}`)
+  void Promise.all([
+    recoverOutstandingRelayAttempts(),
+    autoRequestRefunds(),
+  ]).catch(error => {
+    console.error(`Scheduled recovery operations failed: ${errorMessage(error)}`)
   })
-}, 30_000)
+}, config.recoveryScanIntervalSeconds * 1_000)
 recoveryTimer.unref()
+
+const monitorTimer = setInterval(() => {
+  void systemMonitor.refresh(true).catch(error => {
+    console.error(`Scheduled health monitoring failed: ${errorMessage(error)}`)
+  })
+}, config.monitorIntervalSeconds * 1_000)
+monitorTimer.unref()
 
 const shutdown = () => {
   clearInterval(recoveryTimer)
+  clearInterval(monitorTimer)
   server.close(() => {
     void closeDatabase().finally(() => process.exit(0))
   })
@@ -987,6 +1087,9 @@ process.once('SIGTERM', shutdown)
 
 server.listen(config.port, config.host, () => {
   armLiveBroadcastWindow()
+  void systemMonitor.refresh(true).catch(error => {
+    console.error(`Initial health monitoring failed: ${errorMessage(error)}`)
+  })
   console.log(`NimFuel server listening on ${config.host}:${config.port}`)
   void recoverOutstandingRelayAttempts().catch(error => {
     console.error(`Initial relay recovery scan failed: ${errorMessage(error)}`)

@@ -18,7 +18,7 @@ import {
   reserveRelayAttempt,
 } from '../src/orders.js'
 
-const apiBaseUrl = 'http://127.0.0.1:3001'
+const apiBaseUrl = process.env.NIMFUEL_TEST_API_BASE_URL?.trim() || 'http://127.0.0.1:3001'
 const nimAddress = 'NQ54RXNRPXPH3YXK144CSS31SKBUYYBU6NSJ'
 const evmAddress = '0x83975720D8eCE69356dfCfe5a9900D2B850DaF26'
 const amountRaw = 100_000n
