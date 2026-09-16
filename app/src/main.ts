@@ -477,7 +477,7 @@ function renderWalletPanel() {
       <div class="section-heading"><div><p class="eyebrow">WALLET CHECK</p><h2>See what your wallet can do</h2></div><span class="badge ${apiReady ? 'badge-good' : 'badge-warn'}">${apiReady ? 'API ready' : 'API missing'}</span></div>
       <p class="form-help">NimFuel reads your Nimiq Pay account, Polygon network, USDT balance, and POL balance before asking you to approve anything.</p>
       <div class="results" id="results">${results.map(renderResult).join('')}</div>
-      <button id="run-checks" class="primary-button" type="button" ${flowState === 'connecting' ? 'disabled' : ''}>${flowState === 'connecting' ? 'Checking wallet...' : 'Check wallet'}</button>
+      <button id="run-checks" class="primary-button" type="button" ${flowState === 'connecting' ? 'disabled' : ''}>${flowState === 'connecting' ? 'Checking wallet...' : 'Run wallet check'}</button>
     </section>
   `
 }
@@ -495,11 +495,11 @@ function renderActionPanel() {
     : 'NimFuel will show the exact NIM cost after checking the live Polygon fee.'
   return `
     <section class="panel action-panel">
-      <div class="section-heading"><div><p class="eyebrow">USDT ACTION</p><h2>Prepare the action you need</h2></div><span class="badge">Polygon</span></div>
-      <p class="form-help">${escapeHtml(gasNote)} ${escapeHtml(amountPolicyHint())}</p>
+      <div class="section-heading"><div><p class="eyebrow">USDT ACTION</p><h2>Choose the action you need</h2></div><span class="badge">Polygon</span></div>
+      <p class="form-help">${escapeHtml(gasNote)} Choose any amount accepted by the live server policy. ${escapeHtml(amountPolicyHint())}</p>
       <div class="form-grid">
-        <label><span>Send USDT to</span><input id="relay-recipient" type="text" inputmode="text" autocomplete="off" placeholder="0x..." value="${escapeHtml(defaultRecipient)}" ${locked ? 'disabled' : ''} /></label>
-        <label><span>Amount in USDT</span><input id="relay-amount" type="text" inputmode="decimal" value="${escapeHtml(relayAmountDraft)}" ${locked ? 'disabled' : ''} /></label>
+        <label><span>Where should USDT go?</span><input id="relay-recipient" type="text" inputmode="text" autocomplete="off" placeholder="0x recipient" value="${escapeHtml(defaultRecipient)}" ${locked ? 'disabled' : ''} /></label>
+        <label><span>How much USDT?</span><input id="relay-amount" type="text" inputmode="decimal" placeholder="Enter amount" value="${escapeHtml(relayAmountDraft)}" ${locked ? 'disabled' : ''} /></label>
       </div>
       ${preflightInfo ? `<div class="inline-metrics"><span>Your USDT <strong>${escapeHtml(preflightInfo.userUsdtBalance)}</strong></span><span>Your POL <strong>${escapeHtml(preflightInfo.userPolBalance)}</strong></span><span>Estimated gas <strong>${escapeHtml(preflightInfo.estimatedFeePol)} POL</strong></span></div>` : ''}
       ${locked ? '' : `<button id="prepare-quote" class="primary-button" type="button" ${busy ? 'disabled' : ''}>${nimQuote ? 'Refresh quote' : 'Get quote and continue'}</button>`}
@@ -585,8 +585,16 @@ function render() {
   if (nimOrder) rememberOrder(nimOrder)
   root.innerHTML = `
     <div class="shell">
-      <header class="masthead"><div class="brand-lockup"><span class="brand-mark">N</span><span>NimFuel</span></div><span class="network-label">Polygon / NIM</span></header>
+      <header class="masthead"><div class="brand-lockup" aria-label="NimFuel"><span class="brand-logo-frame"><img class="brand-logo" src="/nimfuel-logo.png" alt="" width="58" height="42" /></span><span class="brand-name">NimFuel</span></div><span class="network-label">Polygon / NIM</span></header>
       <section class="hero"><p class="eyebrow">GAS FOR THE ACTION YOU ALREADY WANT</p><h1>Your USDT action needs Polygon gas. Use NIM to cover it.</h1><p class="lede">NimFuel lets a Nimiq Pay wallet complete a Polygon USDT action without first buying POL.</p></section>
+      <section class="activation-path" aria-label="How NimFuel works">
+        <div class="path-header"><p class="eyebrow">ONE CLEAR PATH</p><span class="path-note">NIM covers the gas. Your USDT action stays yours.</span></div>
+        <ol class="path-steps">
+          <li class="path-step"><span class="path-number">01</span><span><strong>Check</strong><small>Read wallet state</small></span></li>
+          <li class="path-step"><span class="path-number">02</span><span><strong>Pay NIM</strong><small>Confirm the exact quote</small></span></li>
+          <li class="path-step"><span class="path-number">03</span><span><strong>Relay</strong><small>Verify the Polygon receipt</small></span></li>
+        </ol>
+      </section>
       <section class="notice notice-${noticeTone}" aria-live="polite"><span class="notice-dot"></span><div><strong>${escapeHtml(noticeMessage)}</strong><span>Wallet prompts and payment checks appear only when the next step needs them.</span></div></section>
       ${renderWalletPanel()}
       ${renderActionPanel()}

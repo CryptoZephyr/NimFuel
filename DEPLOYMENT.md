@@ -18,7 +18,7 @@ The Neon CLI pulls the pooled `DATABASE_URL` into the ignored `server/.env` file
 
 ## Live relay gate
 
-The default local state is:
+The safe starting state for a new local checkout is:
 
 ```text
 NIMFUEL_ENABLE_LIVE_BROADCAST=false
@@ -33,7 +33,7 @@ NIMFUEL_MAX_USDT_AMOUNT=
 NIMFUEL_LIVE_PROOF_AMOUNT_USDT=
 ```
 
-The normal product flow accepts any amount inside the configured USDT range. A blank maximum lets the user's on-chain USDT balance provide the effective upper limit. Set `NIMFUEL_LIVE_PROOF_AMOUNT_USDT` only for a controlled proof window, for example `0.1`, when the live deployment must be restricted to one tiny value. Leave it blank for flexible live amounts. Set `NIMFUEL_RELAY_MAX_ATTEMPTS` to the retry cap for each paid order. Every retry stays attached to the same order, and the service enters `RECOVERY_REQUIRED` when the cap is reached. If you are upgrading an earlier build, replace `NIMFUEL_LIVE_RELAY_MAX_ATTEMPTS` with `NIMFUEL_RELAY_MAX_ATTEMPTS`.
+The normal product flow accepts any amount inside the configured USDT range. A blank maximum lets the user's on-chain USDT balance provide the effective upper limit. Set `NIMFUEL_LIVE_PROOF_AMOUNT_USDT` only for a controlled proof window when the live deployment must be restricted to one explicit value. Leave it blank for flexible live amounts. Set `NIMFUEL_RELAY_MAX_ATTEMPTS` to the retry cap for each paid order. Every retry stays attached to the same order, and the service enters `RECOVERY_REQUIRED` when the cap is reached. If you are upgrading an earlier build, replace `NIMFUEL_LIVE_RELAY_MAX_ATTEMPTS` with `NIMFUEL_RELAY_MAX_ATTEMPTS`.
 
 For persistent live relay mode, set `NIMFUEL_ENABLE_LIVE_BROADCAST=true` and leave `NIMFUEL_LIVE_BROADCAST_TTL_SECONDS` empty. The server then keeps live broadcasts enabled until the switch is explicitly set to `false` and the service is redeployed. Leave `NIMFUEL_LIVE_PROOF_AMOUNT_USDT` empty for the normal flexible amount range. Set it only when a controlled proof must be restricted to one amount, and clear it afterward.
 
@@ -63,6 +63,6 @@ The backend is deployed as a native Node service on Render.
 - Start command: `node dist/index.js`
 - Health endpoint: `/health`
 - Storage: Neon PostgreSQL
-- Live broadcast: disabled
+- Live broadcast: enabled persistently for the current controlled deployment
 
-Secrets are configured in Render's environment and are not committed. The public app still needs its own hosting configuration and must point `PUBLIC_API_BASE_URL` at the backend URL above.
+Secrets are configured in Render's environment and are not committed. The current deployment leaves `NIMFUEL_LIVE_BROADCAST_TTL_SECONDS` and `NIMFUEL_LIVE_PROOF_AMOUNT_USDT` empty, so live relay remains enabled until the operator explicitly disables it or adds a proof restriction. The public app points `PUBLIC_API_BASE_URL` at the backend URL above.
