@@ -1,0 +1,17 @@
+{
+  "name": "NimFuel",
+  "short_name": "NimFuel",
+  "description": "Use NIM to cover Polygon gas for a USDT action inside Nimiq Pay.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#f1f4ed",
+  "theme_color": "#f1f4ed",
+  "icons": [
+    {
+      "src": "/nimfuel-logo.png",
+      "sizes": "1254x1254",
+      "type": "image/png",
+      "purpose": "any"
+    }
+  ]
+}
