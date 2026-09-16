@@ -73,7 +73,7 @@ The current hosted surfaces are:
 - API: <https://nimfuel-backend.onrender.com>
 - API health: <https://nimfuel-backend.onrender.com/health>
 
-The API runs as a native Node service with Neon PostgreSQL. The frontend is a static Vite build. See [DEPLOYMENT.md](DEPLOYMENT.md) for provider settings and live relay controls. A pushed commit is not hosted evidence until the provider has redeployed it and the hosted health and wallet flow have been checked.
+The API runs as a native Node service with Neon PostgreSQL. The frontend is a static Vite build. See [DEPLOYMENT.md](DEPLOYMENT.md) for provider settings and live relay controls. The backend has been redeployed from `080ce63`, and hosted health plus the address-scoped history route now pass. A new user-authorized wallet flow remains separate hosted proof.
 
 ## Security boundaries
 

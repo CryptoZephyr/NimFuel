@@ -14,7 +14,11 @@ The DEX, USDT-to-NIM, and broader onboarding ideas remain on hold. They belong t
 | --- | --- | --- |
 | Stage 0, ground truth | Complete | Nimiq Pay, Polygon, USDT, and provider assumptions are recorded in the canonical Notion docs. |
 | Stage 1, Cycle II core | Complete for the implemented flow | Local regression coverage and prior hosted paid-to-relay proof cover the current core. A hosted deployment must still be checked after every new release. |
-| Stage 2, reliability productization | Implemented in this repository | Native build, quote, durable, and Stage 2 smoke checks pass locally. Hosted activation and operator configuration remain deployment work. |
+| Stage 2, reliability productization | Implemented and hosted backend redeployed | Native build, quote, durable, and Stage 2 smoke checks pass locally. Hosted `/health` and address-scoped history now return the Stage 2 contract. A clean mobile wallet lifecycle remains user verification evidence. |
+
+## Current hosted evidence
+
+The native Render backend was redeployed from commit `080ce63`. Public `/health` returns `status=pass`, `ready=true`, Neon PostgreSQL storage, and the five dependency checks. The public address-scoped history route returns `200` with durable records. This confirms the service release and history API, but it does not replace a new user-authorized Nimiq Pay relay proof.
 
 ## Stage 2 delivered
 
@@ -30,8 +34,8 @@ The DEX, USDT-to-NIM, and broader onboarding ideas remain on hold. They belong t
 ## Stage 2 operator completion
 
 1. Set the Stage 2 environment values in the deployment provider, including a fallback price source, allowed frontend origin, alert thresholds, and optional webhook.
-2. Deploy the pushed `main` commit with the existing native Node service configuration.
-3. Check `/health` and the protected admin health and metrics endpoints.
+2. Keep the native Node service deployed from the pushed `main` commit and verify its deployment record after each code change. The current backend redeploy is live from `080ce63`.
+3. Check `/health` and the protected admin health and metrics endpoints. Public health and history checks are currently passing.
 4. Run a clean mobile Nimiq Pay flow with a user-selected amount, then reload and confirm the order appears in history.
 5. Keep the current live broadcast policy explicit. Leave the broadcast TTL empty only when persistent live operation is intentional.
 
