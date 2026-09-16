@@ -135,13 +135,14 @@ async function checkPricing() {
 }
 
 async function buildSnapshot(): Promise<HealthSnapshot> {
-  const checks = {
-    database: await runCheck(checkDatabase),
-    polygon: await runCheck(checkPolygon),
-    relayer: await runCheck(checkRelayer),
-    nim: await runCheck(checkNimiq),
-    pricing: await runCheck(checkPricing),
-  }
+  const [database, polygon, relayer, nim, pricing] = await Promise.all([
+    runCheck(checkDatabase),
+    runCheck(checkPolygon),
+    runCheck(checkRelayer),
+    runCheck(checkNimiq),
+    runCheck(checkPricing),
+  ])
+  const checks = { database, polygon, relayer, nim, pricing }
   const status = Object.values(checks).reduce<MonitorStatus>(
     (current, item) => statusRank(item.status) > statusRank(current) ? item.status : current,
     'pass',
