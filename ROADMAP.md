@@ -18,7 +18,7 @@ The DEX, USDT-to-NIM, and broader onboarding ideas remain on hold. They belong t
 
 ## Current hosted evidence
 
-The native Render backend was redeployed from commit `ca30d4e`. Public `/health` returns `status=pass`, `ready=true`, Neon PostgreSQL storage, and the five dependency checks. The public address-scoped history route returns `200` with durable records. This confirms the service release and history API, but it does not replace a new user-authorized Nimiq Pay relay proof.
+The native Render backend was redeployed from commit `aafeb69`. Public `/health` returns `status=pass`, `ready=true`, Neon PostgreSQL storage, and the five dependency checks. The public address-scoped history route returns `200` with durable records. This confirms the service release and history API, but it does not replace a new user-authorized Nimiq Pay relay proof.
 
 ## Stage 2 delivered
 
@@ -34,7 +34,7 @@ The native Render backend was redeployed from commit `ca30d4e`. Public `/health`
 ## Stage 2 operator completion
 
 1. Set the Stage 2 environment values in the deployment provider, including a fallback price source, allowed frontend origin, alert thresholds, and optional webhook.
-2. Keep the native Node service deployed from the pushed `main` commit and verify its deployment record after each code change. The current backend redeploy is live from `ca30d4e`.
+2. Keep the native Node service deployed from the pushed `main` commit and verify its deployment record after each code change. The current backend redeploy is live from `aafeb69`.
 3. Check `/health` and the protected admin health and metrics endpoints. Public health and history checks are currently passing.
 4. Run a clean mobile Nimiq Pay flow with a user-selected amount, then reload and confirm the order appears in history.
 5. Keep the current live broadcast policy explicit. Leave the broadcast TTL empty only when persistent live operation is intentional.
