@@ -78,6 +78,10 @@ The optional automation only queues a paid recovery order. Use the protected ref
 
 Check the backend service, `/health`, `PUBLIC_API_BASE_URL`, the configured allowed origin, and the browser's network path. A local browser on a phone cannot resolve a computer's `localhost`, so use the computer's reachable LAN address for the local app when needed.
 
+### Order history is missing or returns 404
+
+Confirm the frontend and backend were deployed from the same commit. The history UI calls `GET /v1/orders?evmAddress=<address>&limit=<n>`. A `404` from that route means the backend is older than the frontend or is pointed at the wrong service. Redeploy the native backend, check `/health`, then use the history retry control. A valid `200` response with an empty list means the connected Polygon address has no orders in that database.
+
 ## Native deployment
 
 The current Render shape is native Node for `server` and static Vite for `app`.

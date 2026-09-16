@@ -152,6 +152,7 @@ const schemaStatements = [
   `CREATE INDEX IF NOT EXISTS orders_state_idx ON orders (state)`,
   `CREATE INDEX IF NOT EXISTS orders_expires_at_idx ON orders (expires_at)`,
   `CREATE INDEX IF NOT EXISTS orders_evm_address_created_at_idx ON orders (LOWER(evm_address), created_at DESC)`,
+  `CREATE INDEX IF NOT EXISTS orders_evm_address_updated_at_idx ON orders (LOWER(evm_address), updated_at DESC, created_at DESC)`,
   `CREATE INDEX IF NOT EXISTS orders_updated_at_idx ON orders (updated_at DESC)`,
   `CREATE INDEX IF NOT EXISTS relay_attempts_order_id_idx ON relay_attempts (order_id)`,
   `CREATE INDEX IF NOT EXISTS relay_attempts_status_idx ON relay_attempts (status)`,

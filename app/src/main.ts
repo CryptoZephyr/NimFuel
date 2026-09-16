@@ -355,7 +355,10 @@ async function loadOrderHistory() {
     if (requestId !== historyRequestId || evmAddress !== address) return
     historyOrders = []
     historyState = 'error'
-    historyFeedback = friendlyError(error, 'Order history could not be loaded.')
+    const message = errorText(error, 'Order history could not be loaded.')
+    historyFeedback = /HTTP 404|Not found/i.test(message)
+      ? 'Order history is unavailable from this server release. Confirm the hosted app and API are on the same deployment, then retry.'
+      : friendlyError(error, 'Order history could not be loaded.')
   }
   render()
 }

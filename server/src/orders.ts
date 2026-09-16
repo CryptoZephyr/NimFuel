@@ -714,7 +714,7 @@ export async function getOrdersByEvmAddress(evmAddress: string, limit: number) {
   const result = await pool.query<DbOrderRow>(
     `SELECT * FROM orders
      WHERE LOWER(evm_address) = LOWER($1)
-     ORDER BY created_at DESC
+     ORDER BY updated_at DESC, created_at DESC, id DESC
      LIMIT $2`,
     [evmAddress, limit],
   )
