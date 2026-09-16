@@ -71,6 +71,6 @@ The backend is deployed as a native Node service on Render.
 - Storage: Neon PostgreSQL
 - Live broadcast: enabled persistently for the current controlled deployment
 
-The current backend deployment is live from commit `080ce63`. Hosted `/health` returns `status=pass` and `ready=true`, and `GET /v1/orders?evmAddress=...` returns the Stage 2 history contract. The next hosted check is a clean user-authorized Nimiq Pay flow, including relay and receipt verification.
+The current backend deployment is live from commit `ca30d4e`. Hosted `/health` returns `status=pass` and `ready=true`, and `GET /v1/orders?evmAddress=...` returns the Stage 2 history contract. The next hosted check is a clean user-authorized Nimiq Pay flow, including relay and receipt verification.
 
 Secrets are configured in Render's environment and are not committed. After each code push, confirm that Render has redeployed the new commit before using the hosted app as evidence. Verify the live broadcast flag, amount policy, dependency checks, and current deployment status from the hosted `/health` response. The public app points `PUBLIC_API_BASE_URL` at the backend URL above.
