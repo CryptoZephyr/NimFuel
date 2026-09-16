@@ -35,7 +35,7 @@ NIMFUEL_LIVE_PROOF_AMOUNT_USDT=
 
 The normal product flow accepts any amount inside the configured USDT range. A blank maximum lets the user's on-chain USDT balance provide the effective upper limit. Set `NIMFUEL_LIVE_PROOF_AMOUNT_USDT` only for a controlled proof window, for example `0.1`, when the live deployment must be restricted to one tiny value. Leave it blank for flexible live amounts. Set `NIMFUEL_RELAY_MAX_ATTEMPTS` to the retry cap for each paid order. Every retry stays attached to the same order, and the service enters `RECOVERY_REQUIRED` when the cap is reached. If you are upgrading an earlier build, replace `NIMFUEL_LIVE_RELAY_MAX_ATTEMPTS` with `NIMFUEL_RELAY_MAX_ATTEMPTS`.
 
-For a short approved production-like proof, set the live switch to `true`, set `NIMFUEL_LIVE_BROADCAST_TTL_SECONDS` to the required window, set the proof amount if required, restart the server, confirm `/health` reports the live switch enabled, and run one already-paid order. The server refuses to start live mode without an explicit TTL and disables new broadcasts automatically when the window expires. Set the live switch back to `false` after the receipt is independently verified.
+For persistent live relay mode, set `NIMFUEL_ENABLE_LIVE_BROADCAST=true` and leave `NIMFUEL_LIVE_BROADCAST_TTL_SECONDS` empty. The server then keeps live broadcasts enabled until the switch is explicitly set to `false` and the service is redeployed. Leave `NIMFUEL_LIVE_PROOF_AMOUNT_USDT` empty for the normal flexible amount range. Set it only when a controlled proof must be restricted to one amount, and clear it afterward.
 
 ## Quote and recovery API
 

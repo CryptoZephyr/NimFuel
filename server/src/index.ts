@@ -132,7 +132,9 @@ type RelayPreparationInput = {
 }
 
 function enforceLiveProofAmount(amountRaw: bigint) {
-  if (config.liveProofAmountRaw !== null && amountRaw !== config.liveProofAmountRaw) {
+  if (isLiveBroadcastEnabled()
+    && config.liveProofAmountRaw !== null
+    && amountRaw !== config.liveProofAmountRaw) {
     throw new Error(`The controlled live proof accepts exactly ${formatUsdtAmount(config.liveProofAmountRaw)} USDT.`)
   }
 }

@@ -74,10 +74,6 @@ if (liveBroadcastTtlRaw !== null && (!/^\d+$/.test(liveBroadcastTtlRaw) || Numbe
   throw new Error('NIMFUEL_LIVE_BROADCAST_TTL_SECONDS must be a positive integer when configured.')
 }
 
-if (liveBroadcastEnabled && liveBroadcastTtlRaw === null) {
-  throw new Error('NIMFUEL_LIVE_BROADCAST_TTL_SECONDS is required when live broadcast is enabled.')
-}
-
 if (quoteTtlSeconds === null) {
   throw new Error('NIMFUEL_QUOTE_TTL_SECONDS must be a positive integer.')
 }
@@ -180,7 +176,9 @@ export function usdtAmountPolicy() {
   return {
     minUsdtAmount: formatUsdtAmount(config.minUsdtAmountRaw),
     maxUsdtAmount: config.maxUsdtAmountRaw === null ? null : formatUsdtAmount(config.maxUsdtAmountRaw),
-    liveProofAmountUsdt: config.liveProofAmountRaw === null ? null : formatUsdtAmount(config.liveProofAmountRaw),
+    liveProofAmountUsdt: isLiveBroadcastEnabled() && config.liveProofAmountRaw !== null
+      ? formatUsdtAmount(config.liveProofAmountRaw)
+      : null,
   }
 }
 
