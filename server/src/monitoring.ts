@@ -1,7 +1,7 @@
 import { createPublicClient, formatUnits, http } from 'viem'
 import { privateKeyToAccount } from 'viem/accounts'
 import { databaseHealth } from './db.js'
-import { config, polygon, POLYGON_CHAIN_ID, POLYGON_USDT_ADDRESS } from './config.js'
+import { config, isRelaySafetyPaused, polygon, POLYGON_CHAIN_ID, POLYGON_USDT_ADDRESS } from './config.js'
 import { readNimiqAccount, parseNimInteger } from './nim.js'
 import { readMarketPrices } from './prices.js'
 import { tokenAbi } from './relay.js'
@@ -23,6 +23,7 @@ export type HealthSnapshot = {
   checks: Record<string, HealthCheck>
   alertsConfigured: boolean
   liveBroadcastEnabled: boolean
+  relaySafetyPaused: boolean
 }
 
 const publicClient = createPublicClient({ chain: polygon, transport: http(config.polygonRpcUrl) })
@@ -154,6 +155,7 @@ async function buildSnapshot(): Promise<HealthSnapshot> {
     checks,
     alertsConfigured: Boolean(config.alertWebhookUrl),
     liveBroadcastEnabled: config.liveBroadcastEnabled,
+    relaySafetyPaused: isRelaySafetyPaused(),
   }
 }
 
@@ -192,6 +194,7 @@ export class SystemMonitor {
       status: snapshot.status,
       checkedAt: snapshot.checkedAt,
       liveBroadcastEnabled: snapshot.liveBroadcastEnabled,
+      relaySafetyPaused: snapshot.relaySafetyPaused,
       alertsConfigured: snapshot.alertsConfigured,
       checks: Object.fromEntries(Object.entries(snapshot.checks).map(([key, item]) => [key, {
         status: item.status,

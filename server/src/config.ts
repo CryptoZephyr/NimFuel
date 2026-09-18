@@ -15,6 +15,7 @@ const relayMaxAttemptsRaw = process.env.NIMFUEL_RELAY_MAX_ATTEMPTS?.trim() || '3
 const relayReservationGraceRaw = process.env.NIMFUEL_RELAY_RESERVATION_GRACE_SECONDS?.trim() || '60'
 const liveBroadcastTtlRaw = process.env.NIMFUEL_LIVE_BROADCAST_TTL_SECONDS?.trim() || null
 const liveBroadcastEnabled = process.env.NIMFUEL_ENABLE_LIVE_BROADCAST?.trim().toLowerCase() === 'true'
+const relaySafetyPaused = process.env.NIMFUEL_RELAY_SAFETY_PAUSE?.trim().toLowerCase() === 'true'
 const quoteTtlRaw = process.env.NIMFUEL_QUOTE_TTL_SECONDS?.trim() || '300'
 const serviceFeeBpsRaw = process.env.NIMFUEL_SERVICE_FEE_BPS?.trim() || '0'
 const minPaymentLunaRaw = process.env.NIMFUEL_MIN_PAYMENT_LUNA?.trim() || '1000'
@@ -205,6 +206,7 @@ export const config = {
   refundSenderAddress: process.env.NIMFUEL_REFUND_SENDER_ADDRESS?.trim() || null,
   databaseConfigured: Boolean(process.env.DATABASE_URL?.trim()),
   liveBroadcastEnabled,
+  relaySafetyPaused,
   liveBroadcastTtlSeconds: liveBroadcastTtlRaw === null ? null : Number(liveBroadcastTtlRaw),
   relayMaxAttempts,
   relayReservationGraceSeconds: Number(relayReservationGraceRaw),
@@ -237,6 +239,12 @@ export function armLiveBroadcastWindow() {
 export function isLiveBroadcastEnabled() {
   return config.liveBroadcastEnabled
     && (liveBroadcastExpiresAt === null || Date.now() < liveBroadcastExpiresAt)
+}
+
+export const relaySafetyPauseMessage = 'Stablecoin relay is temporarily paused while Nimiq investigates a Gas Abstraction security issue. No new relay transactions are being accepted.'
+
+export function isRelaySafetyPaused() {
+  return config.relaySafetyPaused
 }
 
 if (!Number.isInteger(config.port) || config.port < 1 || config.port > 65535) {

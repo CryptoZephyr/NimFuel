@@ -47,6 +47,17 @@ Stage 2 adds these controls:
 
 For persistent live operation, set `NIMFUEL_ENABLE_LIVE_BROADCAST=true` and leave `NIMFUEL_LIVE_BROADCAST_TTL_SECONDS` empty. Keep `NIMFUEL_LIVE_PROOF_AMOUNT_USDT` empty for flexible amounts. Set it only for an explicitly controlled proof window.
 
+## Temporary stablecoin relay safety pause
+
+NimFuel is temporarily paused while Nimiq investigates a Stablecoin Gas Abstraction security issue involving OpenGSN. Production must use these settings for the pause:
+
+- `NIMFUEL_ENABLE_LIVE_BROADCAST=false`
+- `NIMFUEL_RELAY_SAFETY_PAUSE=true`
+
+The server rejects preflight, validation, new order, payment-verification, and relay-execution requests with a clear `503` response. The frontend shows the same notice before it can request a NIM payment. Wallet checks, order history, completed transactions, and saved order records remain available. No automatic relay recovery or refund queueing runs while the pause is active.
+
+Do not delete or reset orders, payment records, relay attempts, or transaction evidence. Do not retry relays or send refunds automatically. Re-enable only after Nimiq publishes technical clarification and NimFuel's relay path has been reviewed against the affected mechanism.
+
 ## Health and metrics
 
 - `GET /health` returns the public status, readiness, live-broadcast flag, and dependency check summaries.

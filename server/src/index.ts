@@ -2,7 +2,7 @@ import { createPublicClient, createWalletClient, formatUnits, http, parseEventLo
 import { privateKeyToAccount } from 'viem/accounts'
 import { timingSafeEqual } from 'node:crypto'
 import { initializeDatabase, closeDatabase } from './db.js'
-import { armLiveBroadcastWindow, config, formatUsdtAmount, isLiveBroadcastEnabled, polygon, POLYGON_CHAIN_ID, POLYGON_USDT_ADDRESS, requireAddress, requireRawAmount, requireUnsignedInteger, USDT_DECIMALS, usdtAmountPolicy, validateUsdtAmount } from './config.js'
+import { armLiveBroadcastWindow, config, formatUsdtAmount, isLiveBroadcastEnabled, isRelaySafetyPaused, polygon, POLYGON_CHAIN_ID, POLYGON_USDT_ADDRESS, relaySafetyPauseMessage, requireAddress, requireRawAmount, requireUnsignedInteger, USDT_DECIMALS, usdtAmountPolicy, validateUsdtAmount } from './config.js'
 import {
   confirmRefund,
   confirmNimPayment,
@@ -52,6 +52,10 @@ class HttpError extends Error {
     super(message)
     this.name = 'HttpError'
   }
+}
+
+function requireRelayFlowAvailable() {
+  if (isRelaySafetyPaused()) throw new HttpError(503, relaySafetyPauseMessage)
 }
 
 function sendJson(response: import('node:http').ServerResponse, status: number, body: unknown, origin: string | null = '*', extraHeaders: Record<string, string> = {}) {
@@ -396,6 +400,7 @@ async function nimTransactionSenderMatchesOrder(transaction: Awaited<ReturnType<
 }
 
 async function createNimOrder(body: Record<string, unknown>) {
+  requireRelayFlowAvailable()
   if (!config.nimRecipient) throw new Error('NIM payment recipient is not configured.')
 
   const nimAddress = requireNimAddress(body.nimAddress, 'nimAddress')
@@ -412,6 +417,7 @@ async function createNimOrder(body: Record<string, unknown>) {
 }
 
 async function verifyNimPayment(orderId: string, body: Record<string, unknown>) {
+  requireRelayFlowAvailable()
   const order = await orderForId(orderId)
   const txHash = normalizeNimTransactionHash(body.txHash)
 
@@ -734,6 +740,7 @@ async function markRelayRecovery(orderId: string, authorizationDigest: string, m
 }
 
 async function executeNewRelay(orderId: string, prepared: Awaited<ReturnType<typeof prepareRelay>>) {
+  requireRelayFlowAvailable()
   if (!isLiveBroadcastEnabled()) throw new Error('Live broadcast is disabled.')
   if (!relayerAccount || !walletClient) throw new Error('Relayer private key is not configured with a valid format.')
   enforceLiveProofAmount(prepared.amountRaw)
@@ -768,6 +775,7 @@ async function executeNewRelay(orderId: string, prepared: Awaited<ReturnType<typ
 }
 
 async function executeOrderRelay(orderId: string, body: Record<string, unknown>) {
+  requireRelayFlowAvailable()
   const order = await orderForId(orderId)
 
   if (order.state === 'FULFILLED') {
@@ -858,6 +866,7 @@ async function executeOrderRelay(orderId: string, body: Record<string, unknown>)
 }
 
 async function executeRelay(body: Record<string, unknown>) {
+  requireRelayFlowAvailable()
   if (typeof body.orderId !== 'string' || !body.orderId.trim()) {
     throw new Error('orderId is required for live relay execution.')
   }
@@ -865,6 +874,7 @@ async function executeRelay(body: Record<string, unknown>) {
 }
 
 async function recoverOutstandingRelayAttempts() {
+  if (isRelaySafetyPaused()) return
   const attempts = await getOutstandingRelayAttempts()
   for (const attempt of attempts) {
     if (recoveryInFlight.has(attempt.authorizationDigest)) continue
@@ -888,6 +898,7 @@ async function recoverOutstandingRelayAttempts() {
 }
 
 async function autoRequestRefunds() {
+  if (isRelaySafetyPaused()) return
   if (config.autoRefundAfterSeconds === null) return
   const candidates = await getOrdersReadyForAutoRefund(config.autoRefundAfterSeconds)
   for (const order of candidates) {
@@ -949,6 +960,8 @@ const server = (await import('node:http')).createServer(async (request, response
         refundVerificationConfigured: Boolean(config.nimVerificationEndpoint),
         databaseConfigured: config.databaseConfigured,
         liveBroadcastEnabled: isLiveBroadcastEnabled(),
+        relaySafetyPaused: isRelaySafetyPaused(),
+        relaySafetyPauseMessage: isRelaySafetyPaused() ? relaySafetyPauseMessage : null,
         relayMaxAttempts: config.relayMaxAttempts,
         amountPolicy: usdtAmountPolicy(),
       })
@@ -956,26 +969,34 @@ const server = (await import('node:http')).createServer(async (request, response
     }
 
     if (request.method === 'GET' && url.pathname === '/v1/relay/capability') {
-      reply(200, await readCapability())
+      reply(200, {
+        ...await readCapability(),
+        relaySafetyPaused: isRelaySafetyPaused(),
+        relaySafetyPauseMessage: isRelaySafetyPaused() ? relaySafetyPauseMessage : null,
+      })
       return
     }
 
     if (request.method === 'POST' && url.pathname === '/v1/preflight') {
+      requireRelayFlowAvailable()
       reply(200, await createPreflight(await readJson(request)))
       return
     }
 
     if (request.method === 'POST' && url.pathname === '/v1/relay/validate') {
+      requireRelayFlowAvailable()
       reply(200, await validateRelay(await readJson(request)))
       return
     }
 
     if (request.method === 'POST' && url.pathname === '/v1/relay/execute') {
+      requireRelayFlowAvailable()
       reply(200, await executeRelay(await readJson(request)))
       return
     }
 
     if (request.method === 'POST' && url.pathname === '/v1/orders') {
+      requireRelayFlowAvailable()
       reply(201, await createNimOrder(await readJson(request)))
       return
     }
@@ -1042,6 +1063,7 @@ const server = (await import('node:http')).createServer(async (request, response
 
     const paymentMatch = url.pathname.match(/^\/v1\/orders\/([^/]+)\/verify-payment$/)
     if (request.method === 'POST' && paymentMatch) {
+      requireRelayFlowAvailable()
       reply(200, await verifyNimPayment(decodeURIComponent(paymentMatch[1]), await readJson(request)))
       return
     }

@@ -129,6 +129,8 @@ type CapabilityResponse = {
   amountPolicy: AmountPolicy
   relayMaxAttempts: number
   liveBroadcastEnabled: boolean
+  relaySafetyPaused: boolean
+  relaySafetyPauseMessage: string | null
 }
 
 type RelayPayload = {
@@ -177,6 +179,8 @@ type HealthResponse = {
   status: 'pass' | 'degraded' | 'fail'
   checkedAt: string
   checks: Record<string, { status: 'pass' | 'degraded' | 'fail'; detail: string }>
+  relaySafetyPaused: boolean
+  relaySafetyPauseMessage: string | null
 }
 
 const appRoot = document.querySelector<HTMLDivElement>('#app')
@@ -214,6 +218,7 @@ let historyState: 'idle' | 'loading' | 'ready' | 'error' = 'idle'
 let historyFeedback = ''
 let historyRequestId = 0
 let serverStatus: 'unknown' | 'checking' | 'pass' | 'degraded' | 'fail' = 'unknown'
+let relaySafetyPause = { active: false, message: '' }
 
 function resolveApiBaseUrl(value: unknown) {
   if (typeof value !== 'string' || !value.trim()) return ''
@@ -322,6 +327,10 @@ function validateClientAmountPolicy(amountRaw: bigint) {
 
 async function loadAmountPolicy() {
   const response = await apiRequest<CapabilityResponse>('/v1/relay/capability')
+  relaySafetyPause = {
+    active: response.relaySafetyPaused,
+    message: response.relaySafetyPauseMessage || 'Stablecoin relay is temporarily paused. No new relay transactions are being accepted.',
+  }
   if (!response.amountPolicy) throw new Error('The server did not return a USDT amount policy.')
   amountPolicy = response.amountPolicy
   return amountPolicy
@@ -332,6 +341,10 @@ async function loadServiceHealth() {
   try {
     const response = await apiRequest<HealthResponse>('/health')
     serverStatus = response.status
+    relaySafetyPause = {
+      active: response.relaySafetyPaused,
+      message: response.relaySafetyPauseMessage || 'Stablecoin relay is temporarily paused. No new relay transactions are being accepted.',
+    }
     return response
   } catch (error) {
     serverStatus = 'fail'
@@ -571,6 +584,10 @@ function renderActionPanel() {
     return `<section class="panel muted-panel"><p class="eyebrow">USDT ACTION</p><h2>Connect your Nimiq Pay wallet to continue.</h2><p class="form-help">NimFuel needs both the Nimiq Pay account and the Polygon wallet before it can prepare a quote.</p></section>`
   }
 
+  if (relaySafetyPause.active) {
+    return `<section class="panel muted-panel"><p class="eyebrow">TEMPORARY SAFETY PAUSE</p><h2>New stablecoin relays are paused.</h2><p class="form-help">${escapeHtml(relaySafetyPause.message)} You can still run wallet checks and review existing orders.</p></section>`
+  }
+
   const locked = Boolean(nimOrder)
   const busy = ['authorizing', 'preflighting', 'connecting'].includes(flowState)
   const defaultRecipient = relayRecipientDraft || evmAddress
@@ -610,7 +627,8 @@ function renderPaymentPanel() {
   if (!nimOrder || nimOrder.state === 'FULFILLED') return ''
   const paymentNim = String(nimOrder.paymentAmountNim)
   let action = ''
-  if (nimOrder.state === 'AWAITING_NIM_PAYMENT' && nimOrder.paymentTxHash) action = '<button id="verify-nim-payment" class="primary-button" type="button">Verify NIM payment</button>'
+  if (relaySafetyPause.active && ['AWAITING_NIM_PAYMENT', 'PAYMENT_MISMATCH'].includes(nimOrder.state)) action = '<span class="badge badge-warn wide-badge">Payment paused</span>'
+  else if (nimOrder.state === 'AWAITING_NIM_PAYMENT' && nimOrder.paymentTxHash) action = '<button id="verify-nim-payment" class="primary-button" type="button">Verify NIM payment</button>'
   else if (['AWAITING_NIM_PAYMENT', 'PAYMENT_MISMATCH'].includes(nimOrder.state)) action = `<button id="pay-nim-order" class="primary-button" type="button">Pay ${escapeHtml(paymentNim)} NIM in Nimiq Pay</button>`
   else if (nimOrder.state === 'NIM_PAYMENT_CONFIRMED') action = '<span class="badge badge-good wide-badge">NIM payment confirmed</span>'
   else if (nimOrder.state === 'PAYMENT_EXPIRED') action = '<span class="badge badge-warn wide-badge">Payment order expired</span>'
@@ -621,7 +639,7 @@ function renderPaymentPanel() {
       <p class="form-help">Pay the exact amount to NimFuel with the order reference. Polygon fulfillment stays locked until the payment is independently verified.</p>
       <div class="summary-list"><div><span>Amount</span><strong>${escapeHtml(paymentNim)} NIM</strong></div><div><span>Pay to</span><strong>${escapeHtml(shorten(nimOrder.paymentRecipient, 10, 8))}</strong></div><div><span>Reference</span><strong>${escapeHtml(nimOrder.reference)}</strong></div>${nimOrder.paymentBlockNumber ? `<div><span>Included in block</span><strong>${escapeHtml(String(nimOrder.paymentBlockNumber))}</strong></div>` : ''}</div>
       ${action}
-      <p id="payment-status" class="status-line" aria-live="polite">${escapeHtml(paymentFeedback || (nimOrder.paymentTxHash ? 'Payment submitted. Verify it after inclusion.' : 'No payment has been requested yet.'))}</p>
+      <p id="payment-status" class="status-line" aria-live="polite">${escapeHtml(paymentFeedback || (relaySafetyPause.active ? relaySafetyPause.message : nimOrder.paymentTxHash ? 'Payment submitted. Verify it after inclusion.' : 'No payment has been requested yet.'))}</p>
       ${renderNewActionButton()}
     </section>
   `
@@ -637,13 +655,14 @@ function renderRelayPanel() {
     : pending
       ? 'The Polygon transaction has a durable record. Check again after the network includes it.'
       : 'Your payment is confirmed. NimFuel will use the stored authorization and its POL to submit the USDT action.'
+  const paused = relaySafetyPause.active
   return `
     <section class="panel relay-panel">
       <div class="section-heading"><div><p class="eyebrow">POLYGON FULFILLMENT</p><h2>${pending ? 'Confirming your action' : 'Your paid action is ready'}</h2></div><span class="badge ${failed ? 'badge-warn' : ''}">${escapeHtml(stateLabel(nimOrder.state))}</span></div>
       <div class="stage-list"><div class="stage stage-done"><span>01</span><strong>NIM payment confirmed</strong></div><div class="stage ${pending ? 'stage-active' : failed ? 'stage-warn' : 'stage-next'}"><span>02</span><strong>${pending ? 'Polygon transaction submitted' : failed ? 'Polygon retry available' : 'Relay with POL'}</strong></div><div class="stage stage-next"><span>03</span><strong>Verify USDT receipt</strong></div></div>
-      <p class="form-help">${escapeHtml(explanation)}</p>
-      <button id="relay-paid-order" class="primary-button relay-button" type="button">${buttonLabel}</button>
-      <p id="relay-status" class="status-line" aria-live="polite">${escapeHtml(relayFeedback || nimOrder.lastError || 'No Polygon transaction has been broadcast from this page yet.')}</p>
+      <p class="form-help">${escapeHtml(paused ? relaySafetyPause.message : explanation)}</p>
+      ${paused ? '<span class="badge badge-warn wide-badge">Relay paused</span>' : `<button id="relay-paid-order" class="primary-button relay-button" type="button">${buttonLabel}</button>`}
+      <p id="relay-status" class="status-line" aria-live="polite">${escapeHtml(paused ? 'Your existing order remains saved for operator review.' : relayFeedback || nimOrder.lastError || 'No Polygon transaction has been broadcast from this page yet.')}</p>
     </section>
   `
 }
@@ -718,6 +737,7 @@ function render() {
     <div class="shell">
       <header class="masthead"><div class="brand-lockup" aria-label="NimFuel"><span class="brand-logo-frame"><img class="brand-logo" src="/nimfuel-logo.png" alt="" width="58" height="42" /></span><span class="brand-name">NimFuel</span></div><span class="network-label">Polygon / NIM</span></header>
       <section class="hero"><p class="eyebrow">GAS FOR THE ACTION YOU ALREADY WANT</p><h1>Your USDT action needs Polygon gas. Use NIM to cover it.</h1><p class="lede">NimFuel lets a Nimiq Pay wallet complete a Polygon USDT action without first buying POL.</p></section>
+      ${relaySafetyPause.active ? `<section class="notice notice-error" role="status"><span class="notice-dot"></span><div><strong>Stablecoin relay paused</strong><span>${escapeHtml(relaySafetyPause.message)}</span></div></section>` : ''}
       <section class="activation-path" aria-label="How NimFuel works">
         <div class="path-header"><p class="eyebrow">ONE CLEAR PATH</p><span class="path-note">NIM covers the gas. Your USDT action stays yours.</span></div>
         <ol class="path-steps">
@@ -758,6 +778,7 @@ function render() {
 }
 
 render()
+void loadServiceHealth().then(() => render()).catch(() => render())
 
 function startNimiqInit() {
   try {
@@ -915,6 +936,8 @@ async function collectRelayPayload(): Promise<RelayPayload> {
 async function prepareQuote() {
   try {
     if (!nimAddress || !evmAddress) throw new Error('Run the wallet check first.')
+    await loadServiceHealth()
+    if (relaySafetyPause.active) throw new Error(relaySafetyPause.message)
     readRelayDraft()
     const requestedAmountRaw = parseTokenAmount(relayAmountDraft, USDT_DECIMALS)
     if (!amountPolicy) {
@@ -953,6 +976,8 @@ async function prepareQuote() {
 async function createNimPaymentOrder() {
   try {
     if (!nimAddress || !nimQuote) throw new Error('Prepare a live quote first.')
+    await loadServiceHealth()
+    if (relaySafetyPause.active) throw new Error(relaySafetyPause.message)
     if (quoteExpired(nimQuote)) throw new Error('This quote expired. Prepare a new quote.')
     flowState = 'awaiting_nim_payment'
     setNotice('Creating your exact NIM payment order.')
@@ -994,6 +1019,8 @@ async function refreshOrder() {
 async function sendNimPayment() {
   try {
     if (!nimOrder) throw new Error('Create a NIM payment order first.')
+    await loadServiceHealth()
+    if (relaySafetyPause.active) throw new Error(relaySafetyPause.message)
     if (!nimiqPromise) throw new Error('Nimiq Pay initialization did not start.')
     const nimiq = await nimiqPromise
     flowState = 'awaiting_nim_payment'
@@ -1021,6 +1048,8 @@ async function sendNimPayment() {
 async function verifyNimPayment() {
   try {
     if (!nimOrder?.paymentTxHash) throw new Error('Submit the NIM payment first.')
+    await loadServiceHealth()
+    if (relaySafetyPause.active) throw new Error(relaySafetyPause.message)
     setNotice('Checking the Nimiq transaction and order reference.')
     setPaymentStatus('Checking the Nimiq transaction and order reference.')
     const response = await apiRequest<NimOrder>(`/v1/orders/${encodeURIComponent(nimOrder.orderId)}/verify-payment`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ txHash: nimOrder.paymentTxHash }) })
@@ -1042,6 +1071,8 @@ async function verifyNimPayment() {
 async function relayPaidOrder() {
   try {
     if (!nimOrder || !['NIM_PAYMENT_CONFIRMED', 'RELAY_FAILED', 'RELAY_BROADCASTING', 'RELAY_SUBMITTED'].includes(nimOrder.state)) throw new Error('Confirm the NIM payment for this order before relaying.')
+    await loadServiceHealth()
+    if (relaySafetyPause.active) throw new Error(relaySafetyPause.message)
     let requestBody: Record<string, unknown> = { orderId: nimOrder.orderId }
     if (nimOrder.state === 'RELAY_FAILED') {
       readRelayDraft()
