@@ -1,5 +1,6 @@
 import { init } from '@nimiq/mini-app-sdk'
 import './style.css'
+import { renderDocs } from './docs.ts'
 
 type Eip1193Provider = {
   request: (args: { method: string; params?: unknown[] }) => Promise<unknown>
@@ -185,6 +186,10 @@ type HealthResponse = {
 
 const appRoot = document.querySelector<HTMLDivElement>('#app')
 if (!appRoot) throw new Error('App root was not found.')
+
+if (window.location.pathname === '/docs' || window.location.pathname.startsWith('/docs/')) {
+  renderDocs(appRoot)
+} else {
 
 const root = appRoot
 const config = {
@@ -755,7 +760,7 @@ function render() {
       ${renderSuccessPanel()}
       ${renderRecoveryPanel()}
       ${renderHistoryPanel()}
-      <footer><span>Polygon chain ${escapeHtml(config.chainId || 'not configured')}</span><span>Payment is verified before fulfillment</span></footer>
+      <footer><span>Polygon chain ${escapeHtml(config.chainId || 'not configured')}</span><a href="/docs/start/introduction">Docs</a><span>Payment is verified before fulfillment</span></footer>
     </div>
   `
   document.querySelector<HTMLButtonElement>('#run-checks')?.addEventListener('click', runChecks)
@@ -1111,4 +1116,5 @@ async function relayPaidOrder() {
     setRelayStatus(message, true)
     render()
   }
+}
 }
