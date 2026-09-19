@@ -85,6 +85,29 @@ footer,
   padding: 2px 0 42px;
 }
 
+.masthead-actions {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+
+.docs-header-link {
+  padding: 8px 10px;
+  border: 1px solid #b7cab9;
+  border-radius: 999px;
+  color: var(--green-dark);
+  background: rgba(255, 255, 255, 0.7);
+  font-size: 0.74rem;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  text-decoration: none;
+}
+
+.docs-header-link:hover {
+  border-color: var(--green);
+  background: var(--green-soft);
+}
+
 .brand-lockup {
   display: flex;
   align-items: center;
@@ -807,6 +830,16 @@ footer {
 
   .masthead {
     padding-bottom: 30px;
+  }
+
+  .masthead-actions {
+    gap: 6px;
+  }
+
+  .docs-header-link,
+  .network-label {
+    padding: 7px 8px;
+    font-size: 0.62rem;
   }
 
   .hero {

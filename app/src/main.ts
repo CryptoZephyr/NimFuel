@@ -740,7 +740,7 @@ function render() {
   if (nimOrder) rememberOrder(nimOrder)
   root.innerHTML = `
     <div class="shell">
-      <header class="masthead"><div class="brand-lockup" aria-label="NimFuel"><span class="brand-logo-frame"><img class="brand-logo" src="/nimfuel-logo.png" alt="" width="58" height="42" /></span><span class="brand-name">NimFuel</span></div><span class="network-label">Polygon / NIM</span></header>
+      <header class="masthead"><div class="brand-lockup" aria-label="NimFuel"><span class="brand-logo-frame"><img class="brand-logo" src="/nimfuel-logo.png" alt="" width="58" height="42" /></span><span class="brand-name">NimFuel</span></div><div class="masthead-actions"><a class="docs-header-link" href="/docs/start/introduction">Docs</a><span class="network-label">Polygon / NIM</span></div></header>
       <section class="hero"><p class="eyebrow">GAS FOR THE ACTION YOU ALREADY WANT</p><h1>Your USDT action needs Polygon gas. Use NIM to cover it.</h1><p class="lede">NimFuel lets a Nimiq Pay wallet complete a Polygon USDT action without first buying POL.</p></section>
       ${relaySafetyPause.active ? `<section class="notice notice-error" role="status"><span class="notice-dot"></span><div><strong>Stablecoin relay paused</strong><span>${escapeHtml(relaySafetyPause.message)}</span></div></section>` : ''}
       <section class="activation-path" aria-label="How NimFuel works">
@@ -760,7 +760,7 @@ function render() {
       ${renderSuccessPanel()}
       ${renderRecoveryPanel()}
       ${renderHistoryPanel()}
-      <footer><span>Polygon chain ${escapeHtml(config.chainId || 'not configured')}</span><a href="/docs/start/introduction">Docs</a><span>Payment is verified before fulfillment</span></footer>
+      <footer><span>Polygon chain ${escapeHtml(config.chainId || 'not configured')}</span><span>Payment is verified before fulfillment</span></footer>
     </div>
   `
   document.querySelector<HTMLButtonElement>('#run-checks')?.addEventListener('click', runChecks)
