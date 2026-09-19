@@ -26,6 +26,9 @@ const liveProofAmountText = process.env.NIMFUEL_LIVE_PROOF_AMOUNT_USDT?.trim() |
 const adminApiToken = process.env.ADMIN_API_TOKEN?.trim() || null
 const priceFallbackApiUrl = process.env.PRICE_FALLBACK_API_URL?.trim() || null
 const priceFallbackApiKey = process.env.PRICE_FALLBACK_API_KEY?.trim() || null
+const priceFallbackProviderRaw = process.env.PRICE_FALLBACK_PROVIDER?.trim().toLowerCase() || 'coinpaprika'
+const priceNimFallbackPair = process.env.PRICE_NIM_FALLBACK_PAIR?.trim() || 'NIM_USDT'
+const pricePolFallbackPair = process.env.PRICE_POL_FALLBACK_PAIR?.trim() || 'POL_USDT'
 const priceMaxDeviationBpsRaw = process.env.PRICE_MAX_DEVIATION_BPS?.trim() || '1500'
 const priceMaxAgeSecondsRaw = process.env.PRICE_MAX_AGE_SECONDS?.trim() || '120'
 const alertMinRelayerPolText = process.env.NIMFUEL_ALERT_MIN_RELAYER_POL?.trim() || '0.1'
@@ -128,6 +131,16 @@ if (allowedOrigins.length === 0) throw new Error('NIMFUEL_ALLOWED_ORIGINS must c
 
 if (priceMaxDeviationBps > 10_000) throw new Error('PRICE_MAX_DEVIATION_BPS must be between 0 and 10000.')
 
+if (!['coinpaprika', 'gate'].includes(priceFallbackProviderRaw)) {
+  throw new Error('PRICE_FALLBACK_PROVIDER must be coinpaprika or gate.')
+}
+
+const priceFallbackProvider = priceFallbackProviderRaw as 'coinpaprika' | 'gate'
+
+if (!/^[A-Z0-9_]+$/.test(priceNimFallbackPair) || !/^[A-Z0-9_]+$/.test(pricePolFallbackPair)) {
+  throw new Error('Fallback market pairs must contain only uppercase letters, numbers, and underscores.')
+}
+
 if (!polygonRpcUrl) {
   throw new Error('POLYGON_RPC_URL is required.')
 }
@@ -189,6 +202,9 @@ export const config = {
   priceApiKey: process.env.PRICE_API_KEY?.trim() || null,
   priceFallbackApiUrl,
   priceFallbackApiKey,
+  priceFallbackProvider,
+  priceNimFallbackPair,
+  pricePolFallbackPair,
   priceApiKeyConfigured: Boolean(process.env.PRICE_API_KEY?.trim()),
   priceFallbackApiKeyConfigured: Boolean(priceFallbackApiKey),
   priceNimTickerId: process.env.PRICE_NIM_TICKER_ID?.trim() || 'nim-nimiq',

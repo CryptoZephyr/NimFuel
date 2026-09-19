@@ -40,14 +40,15 @@ type PriceSource = {
   name: 'primary' | 'fallback'
   url: string
   apiKey: string | null
+  provider: 'coinpaprika' | 'gate'
 }
 
 const priceCache = new Map<string, MarketPrice>()
 
 function configuredSources() {
   const sources: PriceSource[] = []
-  if (config.priceApiUrl) sources.push({ name: 'primary', url: config.priceApiUrl, apiKey: config.priceApiKey })
-  if (config.priceFallbackApiUrl) sources.push({ name: 'fallback', url: config.priceFallbackApiUrl, apiKey: config.priceFallbackApiKey })
+  if (config.priceApiUrl) sources.push({ name: 'primary', url: config.priceApiUrl, apiKey: config.priceApiKey, provider: 'coinpaprika' })
+  if (config.priceFallbackApiUrl) sources.push({ name: 'fallback', url: config.priceFallbackApiUrl, apiKey: config.priceFallbackApiKey, provider: config.priceFallbackProvider })
   return sources
 }
 
@@ -98,8 +99,33 @@ export function parseMarketPricePayload(payload: unknown, tickerId: string, prov
   }
 }
 
-async function fetchMarketPrice(source: PriceSource, tickerId: string) {
-  const endpoint = `${source.url.replace(/\/$/, '')}/tickers/${encodeURIComponent(tickerId)}?quotes=USD`
+export function parseGateMarketPricePayload(payload: unknown, tickerId: string, provider: string, retrievedAt = new Date().toISOString()): MarketPrice {
+  const entry = Array.isArray(payload) ? payload[0] : null
+  const record = typeof entry === 'object' && entry !== null ? entry as Record<string, unknown> : null
+  const price = record?.last
+  const usdNanos = parseUsdNanos(price)
+
+  return {
+    tickerId,
+    symbol: tickerId.split('_')[0] || tickerId,
+    usd: typeof price === 'number' || typeof price === 'string' ? String(price) : usdNanos.toString(),
+    usdNanos,
+    retrievedAt,
+    provider,
+    fromCache: false,
+  }
+}
+
+function endpointFor(source: PriceSource, tickerId: string) {
+  if (source.provider === 'gate') {
+    const pair = tickerId === config.priceNimTickerId ? config.priceNimFallbackPair : config.pricePolFallbackPair
+    return `${source.url.replace(/\/$/, '')}/spot/tickers?currency_pair=${encodeURIComponent(pair)}`
+  }
+  return `${source.url.replace(/\/$/, '')}/tickers/${encodeURIComponent(tickerId)}?quotes=USD`
+}
+
+async function fetchMarketPriceOnce(source: PriceSource, tickerId: string) {
+  const endpoint = endpointFor(source, tickerId)
   const headers: Record<string, string> = { Accept: 'application/json' }
   if (source.apiKey) headers['X-API-Key'] = source.apiKey
 
@@ -119,7 +145,22 @@ async function fetchMarketPrice(source: PriceSource, tickerId: string) {
     throw new Error(`Price API returned invalid JSON for ${tickerId}.`)
   }
 
-  return parseMarketPricePayload(payload, tickerId, source.name)
+  return source.provider === 'gate'
+    ? parseGateMarketPricePayload(payload, tickerId, source.name)
+    : parseMarketPricePayload(payload, tickerId, source.name)
+}
+
+async function fetchMarketPrice(source: PriceSource, tickerId: string) {
+  let lastError: unknown
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      return await fetchMarketPriceOnce(source, tickerId)
+    } catch (error) {
+      lastError = error
+      if (attempt < 2) await new Promise(resolve => setTimeout(resolve, 250 * (attempt + 1)))
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error(`Price API could not return ${tickerId}.`)
 }
 
 function priceDeviationBps(first: bigint, second: bigint) {

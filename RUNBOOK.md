@@ -30,7 +30,9 @@ Required existing values remain the same:
 
 Stage 2 adds these controls:
 
-- `PRICE_FALLBACK_API_URL`, `PRICE_FALLBACK_API_KEY`: optional second CoinPaprika-compatible source.
+- `PRICE_FALLBACK_API_URL`, `PRICE_FALLBACK_API_KEY`: optional second price source.
+- `PRICE_FALLBACK_PROVIDER`: use `coinpaprika` for a CoinPaprika-compatible endpoint, or `gate` for Gate.io spot prices.
+- `PRICE_NIM_FALLBACK_PAIR`, `PRICE_POL_FALLBACK_PAIR`: Gate.io pairs when using the `gate` fallback, normally `NIM_USDT` and `POL_USDT`.
 - `PRICE_MAX_DEVIATION_BPS`: maximum allowed difference between successful sources. Quotes stop when sources disagree beyond this threshold.
 - `PRICE_MAX_AGE_SECONDS`: maximum age for the in-memory last-good price when every source is temporarily unavailable.
 - `NIMFUEL_ALERT_MIN_RELAYER_POL`, `NIMFUEL_ALERT_MIN_NIM`: low-balance warning thresholds.

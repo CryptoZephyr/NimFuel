@@ -1,6 +1,6 @@
 import { config } from '../src/config.js'
 import { clearRateLimitBuckets, enforceRateLimit, RateLimitError } from '../src/rate-limit.js'
-import { parseMarketPricePayload } from '../src/prices.js'
+import { parseGateMarketPricePayload, parseMarketPricePayload } from '../src/prices.js'
 
 const apiBaseUrl = process.env.NIMFUEL_TEST_API_BASE_URL?.trim() || 'http://127.0.0.1:3001'
 const probeAddress = '0x0000000000000000000000000000000000000001'
@@ -28,6 +28,13 @@ async function main() {
   assert(parsed.usdNanos === 1_234_568n, 'Price parsing did not round to USD nanos safely.')
   assert(parsed.provider === 'smoke' && !parsed.fromCache, 'Parsed price metadata was not retained.')
   console.log('price parsing and provider metadata: pass')
+
+  const gateParsed = parseGateMarketPricePayload([
+    { currency_pair: 'NIM_USDT', last: '0.001234567891' },
+  ], 'nim-nimiq', 'fallback')
+  assert(gateParsed.usdNanos === 1_234_568n, 'Fallback price parsing did not round to USD nanos safely.')
+  assert(gateParsed.provider === 'fallback' && gateParsed.symbol === 'nim', 'Fallback price metadata was not retained.')
+  console.log('fallback price parsing and provider metadata: pass')
 
   clearRateLimitBuckets()
   enforceRateLimit({ clientId: 'stage2-smoke', scope: 'test', limit: 1, windowSeconds: 60 })
