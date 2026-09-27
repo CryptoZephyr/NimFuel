@@ -248,9 +248,10 @@ async function prepareRelayAuthorization(input: RelayPreparationInput) {
   if (chainId !== POLYGON_CHAIN_ID) {
     throw new Error(`Polygon RPC returned chain ${chainId}, expected ${POLYGON_CHAIN_ID}.`)
   }
-  const estimatedFeeRaw = gasEstimate * gasPrice
+  const gasLimit = withGasMargin(gasEstimate)
+  const estimatedFeeRaw = gasLimit * gasPrice
   if (relayerBalance < estimatedFeeRaw) {
-    throw new Error('Relayer POL balance is below the estimated transaction fee.')
+    throw new Error('Relayer POL balance is below the maximum transaction fee.')
   }
 
   return {
@@ -264,7 +265,7 @@ async function prepareRelayAuthorization(input: RelayPreparationInput) {
     nonce,
     deadline,
     authorizationDigest: metaTransactionDigest(userAddress, nonce, functionSignature as Hex),
-    gasEstimate,
+    gasEstimate: gasLimit,
     gasPrice,
     estimatedFeeRaw,
     userPolBalanceRaw: userPolBalance,
@@ -569,6 +570,38 @@ async function adminLookup(request: import('node:http').IncomingMessage, url: UR
   return await adminOrderSnapshot(order)
 }
 
+function orderHistoryAuthMessage(evmAddress: string, issuedAt: string) {
+  return `NimFuel order history\nAddress: ${evmAddress}\nIssued at: ${issuedAt}`
+}
+
+async function loadOrderHistory(body: Record<string, unknown>) {
+  const address = requireAddress(body.evmAddress, 'evmAddress')
+  if (typeof body.issuedAt !== 'string' || !body.issuedAt.trim()) throw new HttpError(401, 'issuedAt is required to load order history.')
+  if (typeof body.signature !== 'string' || !/^0x[0-9a-f]+$/i.test(body.signature)) {
+    throw new HttpError(401, 'A wallet signature is required to load order history.')
+  }
+  const issuedAt = body.issuedAt.trim()
+  const issuedAtMs = Date.parse(issuedAt)
+  if (!Number.isFinite(issuedAtMs)) throw new HttpError(401, 'issuedAt must be an ISO timestamp.')
+  const ageMs = Date.now() - issuedAtMs
+  if (ageMs < -60_000 || ageMs > config.historyAuthTtlSeconds * 1_000) {
+    throw new HttpError(401, 'The order history signature has expired. Sign again to continue.')
+  }
+  const valid = await publicClient.verifyMessage({
+    address,
+    message: orderHistoryAuthMessage(address.toLowerCase(), issuedAt),
+    signature: body.signature as Hex,
+  })
+  if (!valid) throw new HttpError(401, 'The order history signature does not match this address.')
+
+  const requestedLimit = typeof body.limit === 'number' ? body.limit : config.historyLimit
+  const limit = Number.isSafeInteger(requestedLimit)
+    ? Math.min(Math.max(1, requestedLimit), config.historyLimit)
+    : config.historyLimit
+  const orders = await getOrdersByEvmAddress(address, limit)
+  return { orders: orders.map(publicOrderHistory), limit }
+}
+
 const RELAY_RECEIPT_TIMEOUT_MS = config.relayReceiptTimeoutSeconds * 1_000
 
 function requestedAuthorizationDigest(body: Record<string, unknown>) {
@@ -762,7 +795,7 @@ async function executeNewRelay(orderId: string, prepared: Awaited<ReturnType<typ
       to: POLYGON_USDT_ADDRESS,
       data: prepared.executeData,
       value: 0n,
-      gas: withGasMargin(prepared.gasEstimate),
+      gas: prepared.gasEstimate,
     })
   } catch (error) {
     await markRelayRecovery(orderId, prepared.authorizationDigest, 'The relayer request ended without a transaction hash. Manual recovery is required before retrying.')
@@ -1048,16 +1081,8 @@ const server = (await import('node:http')).createServer(async (request, response
       return
     }
 
-    if (request.method === 'GET' && url.pathname === '/v1/orders') {
-      const evmAddress = url.searchParams.get('evmAddress')?.trim()
-      if (!evmAddress) throw new HttpError(400, 'evmAddress is required to load order history.')
-      const address = requireAddress(evmAddress, 'evmAddress')
-      const requestedLimit = Number(url.searchParams.get('limit') || config.historyLimit)
-      const limit = Number.isSafeInteger(requestedLimit)
-        ? Math.min(Math.max(1, requestedLimit), config.historyLimit)
-        : config.historyLimit
-      const orders = await getOrdersByEvmAddress(address, limit)
-      reply(200, { orders: orders.map(publicOrderHistory), limit })
+    if (request.method === 'POST' && url.pathname === '/v1/orders/history') {
+      reply(200, await loadOrderHistory(await readJson(request)))
       return
     }
 

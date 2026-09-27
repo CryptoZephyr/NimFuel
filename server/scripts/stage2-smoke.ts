@@ -58,11 +58,13 @@ async function main() {
   }
   console.log('dependency health snapshot: pass')
 
-  const history = await request(`/v1/orders?evmAddress=${probeAddress}&limit=1`)
-  assert(history.status === 200 && typeof history.body === 'object' && history.body !== null, 'The order history endpoint did not respond.')
-  const historyBody = history.body as Record<string, unknown>
-  assert(Array.isArray(historyBody.orders) && historyBody.limit === Math.min(1, config.historyLimit), 'The order history endpoint returned an invalid shape.')
-  console.log('durable order history endpoint: pass')
+  const history = await request('/v1/orders/history', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ evmAddress: probeAddress, limit: 1 }),
+  })
+  assert(history.status === 401, 'The order history endpoint did not require a wallet signature.')
+  console.log('order history signature gate: pass')
 
   const adminMetrics = await request('/v1/admin/metrics')
   assert(adminMetrics.status === 401 || adminMetrics.status === 503, 'The admin metrics endpoint did not require configured admin access.')

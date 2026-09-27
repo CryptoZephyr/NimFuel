@@ -97,7 +97,8 @@ The verified-proof page records a completed live Polygon USDT relay. It is evide
 - The wallet signs the recipient, amount, token, chain context, and nonce. The server additionally rejects authorizations past their deadline; the token's meta-transaction format does not include a deadline, so a signed authorization stays valid on-chain until its nonce is used.
 - NimFuel verifies the NIM payment against the exact order before Polygon fulfillment is unlocked.
 - Relay attempts and recovery states are durable. A retry stays attached to the same paid order and requires a fresh authorization when needed.
-- Orders and history are scoped to the connected Polygon address.
+- Orders and history are scoped to the connected Polygon address. Loading history requires a short-lived wallet signature (EIP-191) proving ownership of that address.
+- Rate limits key on the socket address; set `NIMFUEL_TRUST_PROXY=true` only behind a proxy that appends `X-Forwarded-For` (enabled automatically on Render).
 
 Read [SECURITY.md](SECURITY.md) for the reporting process and operational boundaries.
 

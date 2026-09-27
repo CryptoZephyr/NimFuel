@@ -47,6 +47,8 @@ const rateLimitOrderRaw = process.env.NIMFUEL_RATE_LIMIT_ORDER_PER_WINDOW?.trim(
 const rateLimitRelayRaw = process.env.NIMFUEL_RATE_LIMIT_RELAY_PER_WINDOW?.trim() || '20'
 const historyLimitRaw = process.env.NIMFUEL_HISTORY_LIMIT?.trim() || '20'
 const allowedOriginsRaw = process.env.NIMFUEL_ALLOWED_ORIGINS?.trim() || '*'
+const trustProxyRaw = process.env.NIMFUEL_TRUST_PROXY?.trim().toLowerCase() || (process.env.RENDER?.trim().toLowerCase() === 'true' ? 'true' : 'false')
+const historyAuthTtlSecondsRaw = process.env.NIMFUEL_HISTORY_AUTH_TTL_SECONDS?.trim() || '600'
 const relayMaxAttempts = Number(relayMaxAttemptsRaw)
 
 function parseUsdtAmountConfig(value: string, label: string) {
@@ -123,6 +125,9 @@ const rateLimitPreparePerWindow = parsePositiveInteger(rateLimitPrepareRaw, 'NIM
 const rateLimitOrderPerWindow = parsePositiveInteger(rateLimitOrderRaw, 'NIMFUEL_RATE_LIMIT_ORDER_PER_WINDOW')
 const rateLimitRelayPerWindow = parsePositiveInteger(rateLimitRelayRaw, 'NIMFUEL_RATE_LIMIT_RELAY_PER_WINDOW')
 const historyLimit = parsePositiveInteger(historyLimitRaw, 'NIMFUEL_HISTORY_LIMIT')
+const historyAuthTtlSeconds = parsePositiveInteger(historyAuthTtlSecondsRaw, 'NIMFUEL_HISTORY_AUTH_TTL_SECONDS')
+if (!['true', 'false'].includes(trustProxyRaw)) throw new Error('NIMFUEL_TRUST_PROXY must be true or false.')
+const trustProxy = trustProxyRaw === 'true'
 const allowedOrigins = allowedOriginsRaw === '*'
   ? ['*']
   : allowedOriginsRaw.split(',').map(origin => origin.trim()).filter(Boolean)
@@ -241,6 +246,8 @@ export const config = {
   rateLimitOrderPerWindow,
   rateLimitRelayPerWindow,
   historyLimit,
+  historyAuthTtlSeconds,
+  trustProxy,
   allowedOrigins,
 } as const
 

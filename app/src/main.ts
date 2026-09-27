@@ -219,7 +219,7 @@ let targetFeedback = ''
 let paymentFeedback = ''
 let relayFeedback = ''
 let historyOrders: OrderHistoryItem[] = []
-let historyState: 'idle' | 'loading' | 'ready' | 'error' = 'idle'
+let historyState: 'idle' | 'locked' | 'loading' | 'ready' | 'error' = 'idle'
 let historyFeedback = ''
 let historyRequestId = 0
 let serverStatus: 'unknown' | 'checking' | 'pass' | 'degraded' | 'fail' = 'unknown'
@@ -357,26 +357,96 @@ async function loadServiceHealth() {
   }
 }
 
-async function loadOrderHistory() {
+type HistoryAuth = { address: string; issuedAt: string; signature: string }
+
+const HISTORY_AUTH_STORAGE_KEY = 'nimfuel.historyAuth'
+const HISTORY_AUTH_MAX_AGE_MS = 9 * 60 * 1000
+
+function historyAuthMessage(address: string, issuedAt: string) {
+  return `NimFuel order history\nAddress: ${address}\nIssued at: ${issuedAt}`
+}
+
+function utf8Hex(value: string) {
+  return '0x' + Array.from(new TextEncoder().encode(value), byte => byte.toString(16).padStart(2, '0')).join('')
+}
+
+function storedHistoryAuth(address: string): HistoryAuth | null {
+  try {
+    const parsed = JSON.parse(sessionStorage.getItem(HISTORY_AUTH_STORAGE_KEY) || 'null') as HistoryAuth | null
+    if (!parsed || parsed.address !== address.toLowerCase()) return null
+    const age = Date.now() - Date.parse(parsed.issuedAt)
+    return Number.isFinite(age) && age < HISTORY_AUTH_MAX_AGE_MS ? parsed : null
+  } catch {
+    return null
+  }
+}
+
+function storeHistoryAuth(auth: HistoryAuth | null) {
+  try {
+    if (auth) sessionStorage.setItem(HISTORY_AUTH_STORAGE_KEY, JSON.stringify(auth))
+    else sessionStorage.removeItem(HISTORY_AUTH_STORAGE_KEY)
+  } catch {
+    // Storage can be unavailable in private contexts; signing again still works.
+  }
+}
+
+async function signHistoryAuth(address: string): Promise<HistoryAuth> {
+  const provider = window.ethereum
+  if (!provider) throw new Error('The Nimiq Pay EVM wallet is not available.')
+  const normalized = address.toLowerCase()
+  const issuedAt = new Date().toISOString()
+  const signature = await provider.request({
+    method: 'personal_sign',
+    params: [utf8Hex(historyAuthMessage(normalized, issuedAt)), address],
+  })
+  if (typeof signature !== 'string') throw new Error('The wallet returned no signature.')
+  const auth = { address: normalized, issuedAt, signature }
+  storeHistoryAuth(auth)
+  return auth
+}
+
+async function loadOrderHistory(interactive = false) {
   if (!evmAddress) return
   const address = evmAddress
   const requestId = ++historyRequestId
+  let auth = storedHistoryAuth(address)
+  if (!auth && !interactive) {
+    historyOrders = []
+    historyState = 'locked'
+    historyFeedback = ''
+    render()
+    return
+  }
   historyState = 'loading'
   historyFeedback = ''
   render()
   try {
-    const response = await apiRequest<OrderHistoryResponse>(`/v1/orders?evmAddress=${encodeURIComponent(address)}&limit=10`)
+    auth ??= await signHistoryAuth(address)
+    const response = await apiRequest<OrderHistoryResponse>('/v1/orders/history', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ evmAddress: address, issuedAt: auth.issuedAt, signature: auth.signature, limit: 10 }),
+    })
     if (requestId !== historyRequestId || evmAddress !== address) return
     historyOrders = Array.isArray(response.orders) ? response.orders : []
     historyState = 'ready'
   } catch (error) {
     if (requestId !== historyRequestId || evmAddress !== address) return
     historyOrders = []
-    historyState = 'error'
     const message = errorText(error, 'Order history could not be loaded.')
-    historyFeedback = /HTTP 404|Not found/i.test(message)
-      ? 'Order history is unavailable from this server release. Confirm the hosted app and API are on the same deployment, then retry.'
-      : friendlyError(error, 'Order history could not be loaded.')
+    if (providerErrorCode(error) === '4001') {
+      historyState = 'locked'
+      historyFeedback = 'The signature request was declined.'
+    } else if (/signature/i.test(message)) {
+      storeHistoryAuth(null)
+      historyState = 'locked'
+      historyFeedback = /expired/i.test(message) ? 'Your history session expired. Sign again to view it.' : ''
+    } else {
+      historyState = 'error'
+      historyFeedback = /HTTP 404|Not found/i.test(message)
+        ? 'Order history is unavailable from this server release. Confirm the hosted app and API are on the same deployment, then retry.'
+        : friendlyError(error, 'Order history could not be loaded.')
+    }
   }
   render()
 }
@@ -701,6 +771,9 @@ function renderHistoryPanel() {
   if (historyState === 'loading') {
     return '<section class="panel history-panel"><div class="section-heading"><div><p class="eyebrow">ORDER HISTORY</p><h2>Loading your recent actions</h2></div></div><p class="form-help">NimFuel is syncing the durable order record.</p></section>'
   }
+  if (historyState === 'locked') {
+    return '<section class="panel history-panel"><div class="section-heading"><div><p class="eyebrow">ORDER HISTORY</p><h2>Sign in to view your history</h2></div><span class="badge">Private</span></div><p class="form-help">' + escapeHtml(historyFeedback || 'Sign a message with your wallet to prove you own this address. It costs no gas and is valid for this session.') + '</p><button id="unlock-history" class="secondary-button" type="button">Sign to view order history</button></section>'
+  }
   if (historyState === 'error') {
     return '<section class="panel history-panel"><div class="section-heading"><div><p class="eyebrow">ORDER HISTORY</p><h2>Your history could not be loaded</h2></div><span class="badge badge-warn">Needs retry</span></div><p class="form-help">' + escapeHtml(historyFeedback || 'The server did not return the order history.') + '</p><button id="retry-history" class="secondary-button" type="button">Retry order history</button></section>'
   }
@@ -770,7 +843,8 @@ function render() {
   document.querySelector<HTMLButtonElement>('#verify-nim-payment')?.addEventListener('click', verifyNimPayment)
   document.querySelector<HTMLButtonElement>('#relay-paid-order')?.addEventListener('click', relayPaidOrder)
   document.querySelector<HTMLButtonElement>('#start-new-action')?.addEventListener('click', clearCurrentOrder)
-  document.querySelector<HTMLButtonElement>('#retry-history')?.addEventListener('click', () => { void loadOrderHistory() })
+  document.querySelector<HTMLButtonElement>('#retry-history')?.addEventListener('click', () => { void loadOrderHistory(true) })
+  document.querySelector<HTMLButtonElement>('#unlock-history')?.addEventListener('click', () => { void loadOrderHistory(true) })
   document.querySelectorAll<HTMLButtonElement>('[data-history-order]').forEach(button => {
     button.addEventListener('click', () => {
       const orderId = button.dataset.historyOrder
