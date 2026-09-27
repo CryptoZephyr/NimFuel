@@ -1,4 +1,5 @@
 import type { IncomingMessage } from 'node:http'
+import { config } from './config.js'
 
 export class RateLimitError extends Error {
   readonly status = 429
@@ -24,10 +25,11 @@ function cleanupExpired(now: number, windowMs: number) {
 }
 
 export function requestClientId(request: IncomingMessage) {
+  if (!config.trustProxy) return request.socket.remoteAddress || 'unknown'
   const forwarded = request.headers['x-forwarded-for']
-  if (typeof forwarded === 'string' && forwarded.trim()) return forwarded.split(',')[0].trim()
-  if (Array.isArray(forwarded) && forwarded[0]?.trim()) return forwarded[0].trim()
-  return request.socket.remoteAddress || 'unknown'
+  const header = Array.isArray(forwarded) ? forwarded.join(',') : forwarded
+  const hops = header?.split(',').map(hop => hop.trim()).filter(Boolean) ?? []
+  return hops.at(-1) || request.socket.remoteAddress || 'unknown'
 }
 
 export function enforceRateLimit(input: {
