@@ -2,9 +2,11 @@
 
 ## Active operational state
 
-- [x] Temporarily disable live relay broadcasting in production.
-- [x] Add a backend-enforced safety pause for new quotes, orders, payment verification, and relay execution.
-- [x] Add a frontend notice while retaining safe wallet checks and historical views.
+Live relay broadcasting is enabled in production (`/health` reports `liveBroadcastEnabled: true`, `relaySafetyPaused: false`).
+
+- [x] Add a backend-enforced safety pause for new quotes, orders, payment verification, and relay execution (`NIMFUEL_RELAY_SAFETY_PAUSE`).
+- [x] Add a frontend notice while retaining safe wallet checks and historical views when the pause is active.
 - [x] Preserve all existing orders, payment records, relay attempts, and transaction evidence.
-- [x] Pause automatic recovery and refund queueing.
-- [ ] Re-enable only after Nimiq publishes technical clarification and the NimFuel relay path is reviewed against the affected mechanism.
+- [x] Temporarily pause live relay broadcasting, automatic recovery, and refund queueing pending Nimiq's technical clarification.
+- [x] Review the relay path and re-enable live relay broadcasting in production.
+- [x] Require a wallet signature for order history access.
