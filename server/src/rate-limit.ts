@@ -25,9 +25,9 @@ function cleanupExpired(now: number, windowMs: number) {
 
 export function requestClientId(request: IncomingMessage) {
   const forwarded = request.headers['x-forwarded-for']
-  if (typeof forwarded === 'string' && forwarded.trim()) return forwarded.split(',')[0].trim()
-  if (Array.isArray(forwarded) && forwarded[0]?.trim()) return forwarded[0].trim()
-  return request.socket.remoteAddress || 'unknown'
+  const header = Array.isArray(forwarded) ? forwarded.join(',') : forwarded
+  const hops = header?.split(',').map(hop => hop.trim()).filter(Boolean) ?? []
+  return hops.at(-1) || request.socket.remoteAddress || 'unknown'
 }
 
 export function enforceRateLimit(input: {

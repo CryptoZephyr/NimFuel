@@ -54,6 +54,12 @@ class HttpError extends Error {
   }
 }
 
+const GAS_LIMIT_MARGIN_BPS = 2_000n
+
+function withGasMargin(gasEstimate: bigint) {
+  return gasEstimate + (gasEstimate * GAS_LIMIT_MARGIN_BPS) / 10_000n
+}
+
 function requireRelayFlowAvailable() {
   if (isRelaySafetyPaused()) throw new HttpError(503, relaySafetyPauseMessage)
 }
@@ -756,7 +762,7 @@ async function executeNewRelay(orderId: string, prepared: Awaited<ReturnType<typ
       to: POLYGON_USDT_ADDRESS,
       data: prepared.executeData,
       value: 0n,
-      gas: prepared.gasEstimate,
+      gas: withGasMargin(prepared.gasEstimate),
     })
   } catch (error) {
     await markRelayRecovery(orderId, prepared.authorizationDigest, 'The relayer request ended without a transaction hash. Manual recovery is required before retrying.')
